@@ -35,7 +35,7 @@ from builders import (
     vlnv_ref,
     wire,
 )
-from xactflow_rtl import RtlExporter, generate_files
+from xactflow_rtl_gen import RtlExporter, generate_files
 
 _E = ipxact.Expression
 

@@ -26,7 +26,7 @@ from builders import (
 )
 from test_scenarios import replier, sender, seer
 from xactflow import link
-from xactflow_rtl import RtlExporter, generate_top
+from xactflow_rtl_gen import RtlExporter, generate_top
 
 IO = [wire("in_i", "in", 8), wire("out_o", "out", 8)]
 

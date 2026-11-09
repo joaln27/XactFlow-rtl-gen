@@ -5,7 +5,7 @@ from xactflow import link
 from xactflow_archidesc import Design
 
 from builders import bus, bus_documents, component, has_icarus, has_verilator, library_of, port_map, simulate, slang_errors, verilator_lint, wire
-from xactflow_rtl import generate_files
+from xactflow_rtl_gen import generate_files
 
 # A decoder written the way the rule table is meant to be used: it takes the table as a parameter.
 DECODER = """

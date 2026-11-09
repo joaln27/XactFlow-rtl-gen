@@ -1,4 +1,4 @@
-# xactflow-rtl
+# xactflow-rtl-gen
 
 A [XactFlow](https://github.com/IP-XACT/XactFlow) exporter plugin that generates the SystemVerilog
 of an [IEEE 1685-2022](https://standards.ieee.org/ieee/1685/10307/) IP-XACT design: the module, its
@@ -7,10 +7,10 @@ instances and parameters, the bus and ad hoc wiring between them, and a package 
 ## Installation
 
 ```bash
-pip install xactflow-rtl
+pip install xactflow-rtl-gen
 ```
 
-It adds the `rtl` subcommand to `xactflow`. Requires Python >= 3.9, and XactFlow 0.3: the exporter uses a
+It adds the `rtl-gen` subcommand to `xactflow`. Requires Python >= 3.9, and XactFlow 0.3: the exporter uses a
 private part of XactFlow's evaluator, so it is pinned below 0.4 until that is public.
 
 For development, with the rest of the toolchain and the tests' tools:
@@ -25,14 +25,14 @@ python3 -m venv .venv
 From a design file:
 
 ```bash
-xactflow rtl soc.xml --lib ip/ --output rtl/
+xactflow rtl-gen soc.xml --lib ip/ --output rtl/
 ```
 
 Chained straight from an importer. A design script's `ipxact.Design` holds only VLNV references, not
 the ports and port maps the wiring comes from, so this form needs `lib`:
 
 ```bash
-xactflow archidesc soc.py --then rtl --then-option lib=ip/ --output rtl/
+xactflow archidesc soc.py --then rtl-gen --then-option lib=ip/ --output rtl/
 ```
 
 Both link the design and refuse it if linking reports errors. Regenerating replaces an earlier output,
@@ -42,7 +42,7 @@ From Python:
 
 ```python
 from xactflow import Library, link
-from xactflow_rtl import RtlExporter, generate_files
+from xactflow_rtl_gen import RtlExporter, generate_files
 
 linked = link(design, Library.scan("ip"))
 files = generate_files(linked, common=["clk_i", "rst_ni"])  # file names and their text

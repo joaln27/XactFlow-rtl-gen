@@ -10,7 +10,7 @@ import ipxact
 from pyslang import ast, syntax
 from xactflow import Library, link
 
-from xactflow_rtl import generate_files
+from xactflow_rtl_gen import generate_files
 
 VENDOR = "test.org"
 _E = ipxact.Expression

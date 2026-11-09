@@ -11,8 +11,8 @@ from pyslang import ast, syntax
 from xactflow import link
 
 from conftest import RTL
-from xactflow_rtl import generate_top
-from xactflow_rtl.keywords import SYSTEMVERILOG_KEYWORDS
+from xactflow_rtl_gen import generate_top
+from xactflow_rtl_gen.keywords import SYSTEMVERILOG_KEYWORDS
 
 SOURCES = [RTL / "master_core.sv", RTL / "slave.sv"]
 
