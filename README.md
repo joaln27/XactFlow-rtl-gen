@@ -126,7 +126,8 @@ the component can say which ports those are.
   of its hierarchical component, not the instance's. Values in a design configuration see its own first.
 - **Constants on a net:** `'1` is all ones at that net's width. On a port or sub-port of a named type, such as
   an enum, a constant or an inverted value is cast to it, `mode_pkg::mode_e'(2)`. Where only the compiler knows
-  the width, the module has it check that the constant fits, with `$bits` and `$error` at elaboration.
+  the width, the module has it check that the constant fits, with `$bits` and `$error` at elaboration. slang,
+  Verilator and Icarus 13 run that check; Icarus 12 skips it.
 - **A logical port with no driver on its bus:** the port map's `logicalTieOff`, else the abstraction's
   `defaultValue`, else its receivers stay unconnected. Tie-offs can each cover a logical range, next to
   bits a port drives. An abstraction's default reaches an inout only if nothing else on the bus connects to it.

@@ -278,8 +278,10 @@ rounds are an adversarial AI agent attacking it.
 - **Why:** D20's cast turned a compile error into silent truncation: `mode_e'(6)` into a 2-bit enum compiled
   cleanly in all three tools, where the uncast assign had been rejected. D3 promises that a constant too wide for
   its port is refused, and here only the compiler can tell. Found in the seventh round.
-- **How strong:** slang and Icarus stop with the message. Verilator stops too, but reports it as a warning
-  (`USERERROR`), so a build with `-Wno-fatal` only prints it.
+- **How strong:** slang and Icarus 13 stop with the message. Verilator stops too, but reports it as a warning
+  (`USERERROR`), so a build with `-Wno-fatal` only prints it. Icarus 12, the version Ubuntu 24.04 ships, ignores
+  an elaboration task inside a generate block (its `PGenerate::elaborate_` never runs them), so there the constant
+  still compiles and is cut. Found by the first CI run. Lint with slang or Verilator to rely on the check.
 - **Considered:** refusing every constant into a port of unknown width, which would refuse the enum tie-offs real
   imported IPs need; reading the width from the package source, which IP-XACT doesn't always point to.
 - **Revisit if:** importers start giving the width of a typedef, so the exporter can check it itself.

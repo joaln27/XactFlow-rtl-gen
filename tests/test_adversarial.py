@@ -21,6 +21,7 @@ from builders import (
     design,
     has_icarus,
     has_verilator,
+    icarus_runs_elaboration_tasks_in_generate_blocks,
     hierarchical,
     instance,
     interconnection,
@@ -987,7 +988,7 @@ def test_a_constant_too_wide_for_an_enum_is_stopped_by_the_compiler(tmp_path):
     files = files_of(soc, [mode_getter()])
     assert "if ($bits(g_mode_i) < 3) begin : g_mode_i_fits" in files["soc.sv"]
     assert "DiagCode(ErrorTask)" in slang_errors(ENUM_PACKAGE, files["soc.sv"], ENUMS)
-    if has_icarus:
+    if has_icarus and icarus_runs_elaboration_tasks_in_generate_blocks(tmp_path):  # not before Icarus 13
         with pytest.raises(AssertionError, match="the constant 6 does not fit in g.mode_i, a mode_pkg::mode_e"):
             simulate(tmp_path, {"mode_pkg.sv": ENUM_PACKAGE, **files}, [ENUMS], bench("soc", {}, {"g_seen_o": (2, 2)}), top="tb")
     if has_verilator:

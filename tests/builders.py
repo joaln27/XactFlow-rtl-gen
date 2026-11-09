@@ -301,6 +301,14 @@ def verilator_lint(tmp_path: Path, files: Dict[str, str], sources: Sequence[str]
 
 
 has_icarus = shutil.which("iverilog") is not None
+
+
+def icarus_runs_elaboration_tasks_in_generate_blocks(tmp_path: Path) -> bool:
+    """Icarus 12 ignores an elaboration-time $error inside a generate block, where Icarus 13 stops on it."""
+    probe = tmp_path / "probe.sv"
+    probe.write_text('module probe; if (1) begin : check $error("stop"); end endmodule\n')
+    compiled = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "probe.vvp"), str(probe)], capture_output=True, text=True)
+    return compiled.returncode != 0
 has_verilator = shutil.which("verilator") is not None
 
 
