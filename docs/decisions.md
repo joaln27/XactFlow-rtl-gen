@@ -95,9 +95,9 @@ rounds are an adversarial AI agent attacking it.
 
 - **Decision:** a port's own `defaultValue` applies only through an ad hoc `tiedValue="default"`, where it wins
   over the abstraction's default. An unconnected input with a default is otherwise treated like any other.
-- **Why:** the standard says so explicitly: "a pin is not considered connected from a component to its default
-  value unless it appears in an ad hoc connection as tiedValue == 'default'". The first version tied such
-  inputs to their default, copied from Kactus2, and was silently wrong.
+- **Why:** 7.5.5 of the standard says so explicitly: a port counts as connected to its own default value only
+  through an ad hoc connection whose `tiedValue` is `default`. The first version tied such inputs to their
+  default, copied from Kactus2, and was silently wrong.
 - **Revisit if:** a later revision of the standard changes Table C.2.
 
 ## D9. Two readings the standard does not settle
