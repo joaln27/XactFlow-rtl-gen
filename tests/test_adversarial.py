@@ -220,9 +220,107 @@ def wrapped(**values):
     return wrap, wrap_d, component("plain_send", [wire("data_o", "out", 8)], module="sender")
 
 
-def test_an_override_on_a_reference_to_a_design_is_refused():
-    documents = wrapped(SEL=1)
-    refused("parameter overrides on its reference .* SEL", design("soc", [instance("w", "wrap")]), documents)
+def configured_too(holder, design_name):
+    """The view of a hierarchical component names a design configuration next to its design, as Kactus2
+    writes it. Returns the configuration, which chooses the view of instance m."""
+    holder.model.views[0].design_configuration_instantiation_ref = "dc"
+    holder.model.design_configuration_instantiations = [
+        ipxact.DesignConfigurationInstantiation(name="dc", design_configuration_ref=vlnv_ref("design", "cfg"))
+    ]
+    return choose_view("rtl", "m", design_name)
+
+
+def sized_holder(name, width_parameter, default, **design_values):
+    """A hierarchical component with a parameter `width_parameter` and an output o of that width. Its design
+    holds m, a `sized`, whose WIDTH is the design's parameter DW (8 by default). `design_values` are what the
+    component's reference to its design sets, as {design parameter: expression in the component}."""
+    holder = hierarchical(name, f"{name}_d", [wire("o", "out", f"{width_parameter}-1")])
+    holder.parameters = [design_parameter(width_parameter, str(default))]
+    holder.model.design_instantiations[0].design_ref = vlnv_ref("design", f"{name}_d", **design_values)
+    inside = design(f"{name}_d", [instance("m", "sized", WIDTH="DW")], ad_hocs=[ad_hoc("o", ("m", "data_o"), external=["o"])])
+    inside.parameters = [design_parameter("DW", "8")]
+    return holder, inside, component("sized", [wire("data_o", "out", "WIDTH-1")], parameters={"WIDTH": 8})
+
+
+# --- D25: the values a component's reference to its design gives the design's parameters
+
+
+def test_the_top_components_reference_sets_the_designs_parameters(tmp_path):
+    chip, chip_d, sized = sized_holder("chip", "CW", 16, DW="CW")
+    passes(tmp_path, chip_d, [chip, sized], SIZED, module="chip", expect={"o": (16, 0xFFFF)})
+
+
+def test_the_reference_sets_them_next_to_a_configuration_too(tmp_path):
+    chip, chip_d, sized = sized_holder("chip", "CW", 16, DW="CW")
+    passes(tmp_path, chip_d, [chip, sized, configured_too(chip, "chip_d")], SIZED, module="chip", expect={"o": (16, 0xFFFF)})
+
+
+def test_a_sub_designs_reference_sets_its_parameters(tmp_path):
+    wrap, wrap_d, sized = sized_holder("wrap", "W", 16, DW="W")
+    files = passes(tmp_path, design("soc", [instance("w", "wrap")]), [wrap, wrap_d, sized], SIZED, expect={"w_o": (16, 0xFFFF)})
+    assert ".WIDTH(16)" in files["wrap.sv"].replace(" ", "")
+
+
+def test_without_the_reference_the_designs_own_value_stays(tmp_path):
+    chip, chip_d, sized = sized_holder("chip", "CW", 8)
+    passes(tmp_path, chip_d, [chip, sized], SIZED, module="chip", expect={"o": (8, 0xFF)})
+
+
+def test_a_reference_setting_a_parameter_the_design_lacks_is_refused():
+    refused("its reference to design .*wrap_d.* name no parameter of that design: SEL", design("soc", [instance("w", "wrap")]), wrapped(SEL=1))
+
+
+def test_a_reference_value_naming_nothing_in_the_component_is_refused():
+    chip, chip_d, sized = sized_holder("chip", "CW", 16, DW="NOPE")
+    refused("design parameter DW", chip_d, [chip, sized])
+
+
+def test_a_view_whose_design_and_configuration_disagree_is_refused():
+    wrap, wrap_d, sending = wrapped()
+    configuration = configured_too(wrap, "other_d")
+    refused("names design .*wrap_d.* its design configuration is for .*other_d", design("soc", [instance("w", "wrap")]), [wrap, wrap_d, sending, configuration])
+
+
+# --- D26: a hierarchical instance's values get a module of their own
+
+
+def test_a_hierarchical_instances_values_reach_its_design(tmp_path):
+    wrap, wrap_d, sized = sized_holder("wrap", "W", 8, DW="W")
+    soc = design("soc", [instance("w", "wrap", W=16)])
+    files = passes(tmp_path, soc, [wrap, wrap_d, sized], SIZED, expect={"w_o": (16, 0xFFFF)})
+    assert list(files) == ["soc.sv", "wrap_1.sv"]
+    assert re.search(r"^\s*wrap_1 w \(", files["soc.sv"], re.M)
+    assert "// The version of test.org:ip:wrap:1.0 with W = 16." in files["wrap_1.sv"]
+
+
+def test_one_module_for_each_set_of_values(tmp_path):
+    wrap, wrap_d, sized = sized_holder("wrap", "W", 8, DW="W")
+    soc = design("soc", [instance("a", "wrap", W=16), instance("b", "wrap", W=16), instance("c", "wrap"), instance("d", "wrap", W=8), instance("e", "wrap", W=4)])
+    files = passes(tmp_path, soc, [wrap, wrap_d, sized], SIZED, expect={"a_o": (16, 0xFFFF), "b_o": (16, 0xFFFF), "c_o": (8, 0xFF), "d_o": (8, 0xFF), "e_o": (4, 0xF)})
+    assert sorted(files) == ["soc.sv", "wrap.sv", "wrap_1.sv", "wrap_2.sv"]
+    by_instance = {name: module for module, name in re.findall(r"^\s*(wrap\w*) (\w+) \(", files["soc.sv"], re.M)}
+    assert by_instance == {"a": "wrap_1", "b": "wrap_1", "c": "wrap", "d": "wrap", "e": "wrap_2"}
+
+
+def test_values_pass_down_more_than_one_level(tmp_path):
+    wrap, wrap_d, sized = sized_holder("wrap", "W", 8, DW="W")
+    outer = hierarchical("outer", "outer_d", [wire("o", "out", "OW-1")])
+    outer.parameters = [design_parameter("OW", "8")]
+    outer_d = design("outer_d", [instance("w", "wrap", W="OW")], ad_hocs=[ad_hoc("o", ("w", "o"), external=["o"])])
+    soc = design("soc", [instance("x", "outer", OW=12)])
+    files = passes(tmp_path, soc, [outer, outer_d, wrap, wrap_d, sized], SIZED, expect={"x_o": (12, 0xFFF)})
+    assert sorted(files) == ["outer_1.sv", "soc.sv", "wrap_1.sv"]
+
+
+def test_a_value_for_a_parameter_the_hierarchical_component_lacks_is_refused():
+    wrap, wrap_d, sized = sized_holder("wrap", "W", 8, DW="W")
+    refused("instance 'w': parameter overrides name no parameter of test.org:ip:wrap:1.0: NOPE", design("soc", [instance("w", "wrap", NOPE=1)]), [wrap, wrap_d, sized])
+
+
+def test_a_version_named_like_another_module_is_refused():
+    wrap, wrap_d, sized = sized_holder("wrap", "W", 8, DW="W")
+    clash = component("wrap_1", [wire("data_o", "out", 8)])
+    refused("wrap_1", design("soc", [instance("w", "wrap", W=16), instance("k", "wrap_1")]), [wrap, wrap_d, sized, clash])
 
 
 def test_an_override_on_a_reference_to_an_abstraction_is_refused():
@@ -948,10 +1046,23 @@ def test_an_inverted_enum_connection_is_cast(tmp_path):
     assert "mode_pkg::mode_e'(~" in files["soc.sv"]
 
 
-def test_tying_a_typedef_port_to_its_default_is_refused():
-    the_component = component("mode_getter", [wire("mode_i", "in", type_name="mode_pkg::mode_e", default="1"), wire("seen_o", "out", 2)])
+def test_tying_a_typedef_port_to_its_default_casts_the_default(tmp_path):
+    the_component = component("mode_getter", [wire("mode_i", "in", type_name="mode_pkg::mode_e", default="2"), wire("seen_o", "out", 2)])
     soc = design("soc", [instance("g", "mode_getter")], ad_hocs=[ad_hoc("t", ("g", "mode_i"), tied="default")])
-    refused("tying g.mode_i, a mode_pkg::mode_e, to its default", soc, [the_component])
+    files = passes(tmp_path, soc, [the_component], ENUMS, expect={"g_seen_o": (2, 2)}, packages=ENUM_PACKAGE)
+    assert "mode_pkg::mode_e'(2)" in files["soc.sv"]
+
+
+def test_tying_a_typedef_port_to_a_default_given_in_parts_is_refused():
+    in_parts = [ipxact.Driver(default_value=_E("1"), range=bounds(0, 0)), ipxact.Driver(default_value=_E("0"), range=bounds(1, 1))]
+    the_component = component("mode_getter", [wire("mode_i", "in", type_name="mode_pkg::mode_e", drivers=in_parts), wire("seen_o", "out", 2)])
+    soc = design("soc", [instance("g", "mode_getter")], ad_hocs=[ad_hoc("t", ("g", "mode_i"), tied="default")])
+    refused("tying g.mode_i, a mode_pkg::mode_e, to a default given in parts", soc, [the_component])
+
+
+def test_tying_a_typedef_port_with_no_default_to_its_default_is_refused():
+    soc = design("soc", [instance("g", "mode_getter")], ad_hocs=[ad_hoc("t", ("g", "mode_i"), tied="default")])
+    refused("tied to 'default', but g.mode_i has no default value", soc, [mode_getter()])
 
 
 CFG_PACKAGE = """
@@ -1731,3 +1842,74 @@ def test_windows_reached_from_outside_are_counted_by_the_modules_own_interfaces(
     package = files_of(chip_d, [chip, component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])])["chip_addr_map_pkg.sv"]
     assert "// Reached from outside chip" in package
     assert "{32'd1, 32'h00002000, 32'h00003000}" in package
+
+
+# --- an unpacked array port of an instance can be left open
+
+
+ARRAYED = (
+    "module arr (input logic [7:0] in_i, output logic [7:0] v_o, output logic [7:0] a_o [4]);\n"
+    "  assign v_o = in_i; assign a_o = '{default: 8'h0};\nendmodule\n"
+)
+
+
+def arrayed(array_direction="out"):
+    """`arr` has an output v_o and a port a_o that is an unpacked array of four bytes."""
+    array_port = wire("a_o", array_direction, 8)
+    array_port.arrays = [ipxact.ArrayBound(left=_E("3"), right=_E("0"))]
+    return component("arr", [wire("in_i", "in", 8), wire("v_o", "out", 8), array_port])
+
+
+def chip_around_arr(*extra):
+    chip = hierarchical("chip", "chip_d", [wire("i", "in", 8), wire("o", "out", 8)])
+    connections = [ad_hoc("in", ("m", "in_i"), external=["i"]), ad_hoc("out", ("m", "v_o"), external=["o"]), *extra]
+    return chip, design("chip_d", [instance("m", "arr")], ad_hocs=connections)
+
+
+def test_an_unpacked_array_output_left_open_is_generated(tmp_path):
+    chip, chip_d = chip_around_arr()
+    files = files_of(chip_d, [chip, arrayed()])
+    assert re.search(r"^\s*\.a_o\s*\(\)", files["chip.sv"], re.M)
+    assert slang_errors(*files.values(), ARRAYED) == []
+    if has_verilator:
+        result = verilator_lint(tmp_path, files, [ARRAYED], "chip")
+        assert result.returncode == 0, result.stderr
+
+
+def test_a_connection_to_an_unpacked_array_port_is_refused():
+    chip, chip_d = chip_around_arr()
+    chip.model.ports.append(wire("x", "out", 8))
+    chip_d.ad_hoc_connections.append(ad_hoc("x", ("m", "a_o"), external=["x"]))
+    refused("m.a_o: unpacked array ports are not supported yet", chip_d, [chip, arrayed()])
+
+
+def test_an_unpacked_array_input_is_refused():
+    chip, chip_d = chip_around_arr()
+    refused("m.a_o: unpacked array ports are not supported yet", chip_d, [chip, arrayed("in")])
+
+
+def test_an_unpacked_array_port_that_would_become_a_module_port_is_refused():
+    refused("m.a_o: unpacked array ports are not supported yet", design("soc", [instance("m", "arr")]), [arrayed()])
+
+
+# --- D29: a port map with no logical range takes its port's own bits, from logical bit 0 (B.1.7 b))
+
+
+def word_end(name, mode, direction, width, logical_range=None):
+    port = "data_o" if direction == "out" else "data_i"
+    return component(name, [wire(port, direction, width)], [bus("b", mode, port_map("WORD", port, logical_range=logical_range))])
+
+
+def test_a_narrow_driver_leaves_bits_a_wider_receiver_reads_and_is_refused():
+    soc = design("soc", [instance("m", "half"), instance("s", "seer")], [interconnection("l", ("m", "b"), ("s", "b"))])
+    refused(r"s\.data_i reads bits \[4, 5, 6, 7\] of 'WORD', which nothing drives", soc, [word_end("half", "initiator", "out", 4), seer()])
+
+
+def test_a_port_wider_than_its_logical_port_with_no_range_is_refused():
+    soc = design("soc", [instance("m", "sender"), instance("s", "big")], [interconnection("l", ("m", "b"), ("s", "b"))])
+    refused(r"s\.data_i is 16 bits, mapped to 'WORD' with no logical range.*gives it 8 \(B\.1\.7 b\), SCR 6\.19\)", soc, [sender(), word_end("big", "target", "in", 16)])
+
+
+def test_a_logical_range_past_the_abstractions_width_is_refused():
+    soc = design("soc", [instance("m", "sender"), instance("s", "high")], [interconnection("l", ("m", "b"), ("s", "b"))])
+    refused(r"logical range \[11:8\] of 'WORD' on s\.data_i goes past its width in the abstraction, 8 bits \(SCR 6\.19\)", soc, [sender(), word_end("high", "target", "in", 4, (11, 8))])

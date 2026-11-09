@@ -214,10 +214,10 @@ def test_design_that_contains_itself_is_refused():
         generate(design("loop_d", [instance("i", "loop")], ad_hocs=connections), [loop])
 
 
-def test_parameter_override_on_a_hierarchical_instance_is_refused():
+def test_parameter_override_on_a_hierarchical_instance_must_name_one_of_its_parameters():
     inner = hierarchical("inner", "inner_d", IO)
     inner_design = design("inner_d", [instance("s", "replier")], ad_hocs=wired())
-    with pytest.raises(ValueError, match="overrides on a hierarchical instance are not supported yet"):
+    with pytest.raises(ValueError, match="parameter overrides name no parameter of test.org:ip:inner:1.0: W"):
         generate(design("chip_d", [instance("i", "inner", W=8)]), [inner, inner_design, replier()])
 
 

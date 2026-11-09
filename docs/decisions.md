@@ -260,7 +260,7 @@ rounds are an adversarial AI agent attacking it.
   type, such as an enum or a packed struct, is written as `type'(value)`. So is one that drives a listed
   sub-port of a named type, from the seventh round. A `tiedValue="default"` on such a port is refused, since its
   default can't be read as bits, and so is a constant or an inversion into an unpacked struct, which no cast
-  turns a number into.
+  turns a number into. *Narrowed by D27: one default for the whole port is now taken as a constant.*
 - **Why:** SystemVerilog has no implicit conversion from a number to an enum. All three tools rejected the
   uncast assign, which the sixth round found. Imported IPs with enum inputs, such as OpenTitan's `mubi4_t`, are
   often tied to constants. slang calls the cast of an inverted enum useless, but Icarus and Verilator need it, so
@@ -319,4 +319,122 @@ rounds are an adversarial AI agent attacking it.
 - **The cost:** with this installed, pip won't move to XactFlow 0.4 until a release of this plugin allows it.
 - **Revisit if:** XactFlow makes width and sign public, which is worth asking its maintainer for; then use that, and
   drop the upper bound.
+
+## D24. Another real SoC only when it brings input the earlier ones did not
+*2026-11-09 · active · the author's rule*
+
+- **Decision:** test the exporter on another real SoC only if it brings a kind of input none of the earlier ones
+  did, and stop once one finds no new class of exporter problem. A problem in an importer, or in a test's own import
+  script, is recorded but doesn't count.
+- **The plan this gives:** three in all.
+  - The first (D13), whose IP-XACT this project's own script writes.
+  - [Didactic SoC](https://github.com/Edu4Chip/Didactic-SoC) (Edu4Chip): IP-XACT written by another team in
+    Kactus2, with several levels of hierarchy and design configurations, compared with the tops Kactus2 generated.
+  - [Croc](https://github.com/pulp-platform/croc) (PULP), only if Didactic finds a new class of problem: struct
+    ports, a hand-written top to compare with, and firmware run with open-source tools.
+  - Accellera's Leon2 example, as a check that the standard's own 1685-2022 example generates and compiles, if its
+    terms allow.
+- **Why:** what a SoC covers matters more than how many there are. The first one's IP-XACT comes from this project,
+  so it cannot test the reading of the standard against someone else's. Past that, more SoCs of the same kind mostly
+  retest `xactflow-sv` and the import scripts, and one whose IP-XACT has to be built first takes days.
+- **Considered:** a fixed number of SoCs; larger ones such as X-HEEP or OpenTitan, which would mostly exercise the
+  importer.
+- **Revisit if:** a new importer or flow widens what the exporter is fed (as in D22), or a problem turns up on a design
+  unlike these.
+- **So far:** Didactic SoC (version 1.2 of its design) found a new class of problem on 2026-11-09, so the plan goes on
+  to Croc after it.
+  - **Fixed:** a view that names both a design and a design configuration, as Kactus2 writes it, had the parameter
+    overrides on its design reference dropped without a word, so the design's own defaults were used. This was
+    silent wrong RTL: a value the overrides change, that no width check sees, came out wrong.
+  - **Added to generate it:** values on a design reference (D25), overrides on a hierarchical instance (D26), a
+    typed port tied whole to its default (D27), an unpacked array output left open (D28), and the standard's
+    reading of a port map with no logical range (D29).
+  - **In the input, not the exporter,** and changed by the test before linking: Kactus2 splits a fan-out into one
+    interconnection per pair, which SCR 2.3 rules out; it writes empty `left`, `right` and `defaultValue`
+    expressions where nothing was entered; it ties an input nothing connects to its default, which the standard
+    only does with `tiedValue="default"` (D8), so those ties are written out; three module parameters refer to
+    themselves; and one port is wider in the IP-XACT than in the RTL.
+  - **Read as the standard says, after asking it:** two narrow address ports mapped with no logical range, which
+    the exporter refused and Kactus2 connects to the low bits (D29).
+  - **Result:** all eight modules generate. Every input and output bit of every instance connects as in Kactus2's
+    Verilog, both the committed one and a fresh run, except the eight bits of the port the RTL makes narrower.
+
+## D25. A design reference's values set the design's parameters
+*2026-11-09 · active*
+
+- **Decision:** the `configurableElementValues` on a component's reference to the design it holds give that
+  design's parameters their values. Each value is an expression in the component, worked out with the
+  component's own parameter values, and those of the instance it is generated for (D26). This applies at the
+  top and at every hierarchical instance, also when the view names a design configuration as well, which is how
+  Kactus2 writes every hierarchical component. A value for a parameter the design lacks, or one naming nothing in
+  the component, is refused.
+- **Why:** it is what the reference means: the design's parameters are configurable elements of the design, and
+  the reference configures them. Didactic SoC sets every design parameter this way, from the top component's.
+  Before this, such values were refused, except next to a design configuration, where they were dropped and the
+  design's defaults used without a word.
+- **Considered:** keep refusing them; that left every Kactus2 hierarchy out.
+- **Revisit if:** XactFlow's `link()` starts applying these values itself; then take its result.
+
+## D26. One module for each set of values a hierarchical instance is given
+*2026-11-09 · active*
+
+- **Decision:** a hierarchical instance whose overrides change a parameter of its component gets a module of its
+  own, generated with those values throughout its design: `<module>_1`, `<module>_2`, ... in the order they turn
+  up, one for each distinct set of worked-out values. Instances with the same values share a module, and values
+  that change nothing keep the plain module. The module's first lines name the values it is for. An override for a
+  parameter the component lacks is refused, and so is a version whose name another module already has.
+- **Why:** a generated module's widths and values are worked out by the evaluator (D11), so the module takes no
+  parameters, and its port
+  widths and inner instances depend on the values. Kactus2 writes one module per instance for the same reason,
+  `<module>_0`. Didactic SoC passes its top's values to its system-control subsystem, which changes four of them.
+- **Considered:** generated modules with SystemVerilog parameters, set on each instance. Every width check and
+  value in the module would then have to carry expressions instead of numbers. One module per instance, as
+  Kactus2 does, which repeats identical modules.
+- **The cost:** the name of a version depends on the order instances turn up, so adding one can renumber another.
+- **Revisit if:** generated modules get parameters for another reason, or someone needs stable version names.
+
+## D27. A typed port tied whole to its default takes that default as a constant
+*2026-11-09 · active · narrows D20*
+
+- **Decision:** `tiedValue="default"` on a whole port of a type only the compiler knows, such as an enum or a
+  struct, takes the port's default as one constant, cast to the type (D20) and checked by the compiler (D21), like
+  any other tie. A default given in parts, a tie on part of the port, and a default that is not a number are
+  still refused.
+- **Why:** D20 refused it because such a default cannot be read as bits. A whole default for a whole port needs
+  no bits: it is one value. Didactic SoC ties Ibex's `ram_cfg_i`, a struct, to its default of `'h0`.
+- **Revisit if:** a default given in parts is needed; that needs the type's layout, which only the compiler has.
+
+## D28. An unpacked array output of an instance can be left open
+*2026-11-09 · active*
+
+- **Decision:** an instance's port that is an unpacked array is accepted when nothing connects to it and it is an
+  output or an inout of a module whose ports a component defines: it is written as `.port()`. A connection to
+  it, an input, and one that would have to become a port of the module are refused, as all unpacked arrays were.
+- **Why:** leaving an output open needs nothing of its shape. Didactic SoC has one array port, the PULP GPIO's
+  `gpio_padcfg`, and nothing uses it.
+- **Revisit if:** a design connects an unpacked array port; then the array needs supporting in full.
+
+## D29. A port map with no logical range takes its port's bits from logical bit 0
+*2026-11-09 · active · the standard, read for the author*
+
+- **Decision:** a port map whose logical port has no range, onto a wire port, takes logical bits [the port's
+  width - 1:0], or of its part select. Ends of a bus that map different numbers of bits then connect bit by
+  bit through the logical port's net, by logical bit number: a narrow receiver gets the low bits. A bit an end
+  reads that no end drives is refused. Where bits are picked by number like this, or by an explicit logical
+  range, each end's bits have to lie within the width its abstraction gives the logical port in that mode (SCR
+  6.19); ends that all map whole ports of one width pick none, so that isn't checked there.
+- **Why:** Annex B.1.7 b) of IEEE 1685-2022 says so, normatively: with no logical range on a wire port, the range
+  is the physical port's width counted from 0. SCR 6.18, that both sides of a port map are the same size, then
+  holds by construction. Clause 6.5.5.2 says connections are made by logical bit number. The exporter had read
+  a missing range as the whole logical port and refused the different widths; it wrote no wrong RTL, but it
+  refused valid designs, such as Didactic SoC's 12-bit memory addresses on a 32-bit bus. Kactus2 reads it the
+  standard's way.
+- **Not settled by the standard:** what a logical bit mapped by only one end gets. Bits a driver has and no
+  receiver reads are left unread; bits a receiver reads and no end drives are refused.
+- **Considered:** checking SCR 6.19 everywhere. Kactus2 libraries leave an abstraction's width at its default
+  where every end maps the same whole port, as Didactic does for a 250-bit configuration bus with a width of 5;
+  refusing those would prevent no wrong RTL, and checking the SCRs is XactFlow's part (6.19 has no check there
+  yet).
+- **Revisit if:** the standard or its working group says what a bit only one end maps gets; or a non-wire port
+  needs a default range, for which the standard gives none.
 

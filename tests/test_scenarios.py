@@ -778,9 +778,31 @@ def common_port_on_a_top_component():
     return scenario
 
 
+def narrow_end_without_a_logical_range():
+    """IEEE 1685-2022 B.1.7 b): a wire port mapped with no logical range takes logical bits [its width - 1:0],
+    so a 4-bit receiver of an 8-bit word gets its low half (D29)."""
+    source = """
+    module low_seer (input logic [3:0] data_i, output logic [3:0] seen_o);
+        assign seen_o = data_i;
+    endmodule
+    """
+    return Scenario(
+        "narrow_end_without_a_logical_range",
+        design("soc", [instance("m", "sender"), instance("s", "low_seer")], [interconnection("link", ("m", "b"), ("s", "b"))]),
+        [
+            sender(),
+            component("low_seer", [wire("data_i", "in", 4), wire("seen_o", "out", 4)], [bus("b", "target", port_map("WORD", "data_i"))]),
+        ],
+        SEND_WORD + source,
+        "soc",
+        expect={"s_seen_o": (4, 0x5)},
+    )
+
+
 SCENARIOS = [
     plain_master_to_slave(),
     one_bit_slicing(),
+    narrow_end_without_a_logical_range(),
     physically_sliced_master_to_slave(),
     port_sliced_across_logical_ports(),
     logical_slices_from_two_ports(),

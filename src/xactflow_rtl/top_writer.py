@@ -353,6 +353,7 @@ class _Port:
     undeclared: Set[str] = field(default_factory=set)  # paths of structs with no sub-ports listed, "" likewise
     sub_types: Dict[str, str] = field(default_factory=dict)  # sub-ports of a named type, such as an enum
     unpacked: Set[str] = field(default_factory=set)  # paths of unpacked structs, "" likewise
+    unsupported: Optional[str] = None  # why nothing can connect to it: it can only be left open
 
     @property
     def label(self) -> str:
@@ -430,6 +431,8 @@ class _Child:
     design: ipxact.Design
     configuration: Optional[ipxact.DesignConfiguration]
     view: ipxact.View
+    overrides: Dict[str, str] = field(default_factory=dict)  # the instance's values for the component's parameters
+    module: str = ""  # the module generated for it: one per set of values (D26)
 
 
 def _check_linked(linked: LinkedDesign) -> None:
@@ -501,11 +504,19 @@ def _component_instantiation(
 
 def _design_of_view(
     library: Library, component: ipxact.Component, view: Optional[ipxact.View], where: str
-) -> Optional[Tuple[ipxact.Design, Optional[ipxact.DesignConfiguration]]]:
-    """The design a view holds, directly or through a design configuration, if it holds one."""
+) -> Optional[Tuple[ipxact.Design, Optional[ipxact.DesignConfiguration], Dict[str, object]]]:
+    """The design a view holds, directly or through a design configuration, if it holds one, and the values
+    its reference to the design gives the design's parameters (D25). A view may name both a design and a
+    design configuration; the values are then on the design's reference, which is why it is read either way."""
     if view is None:
         return None
     model = component.model
+    direct = None
+    if view.design_instantiation_ref:
+        direct = next((i for i in model.design_instantiations if i.name == view.design_instantiation_ref), None)
+        if direct is None:
+            raise ValueError(f"{where}: view {view.name!r} refers to a missing design instantiation")
+    values: Dict[str, object] = dict(direct.design_ref.config_element_values) if direct is not None else {}
     if view.design_configuration_instantiation_ref:
         instantiation = next(
             (i for i in model.design_configuration_instantiations if i.name == view.design_configuration_instantiation_ref),
@@ -517,19 +528,20 @@ def _design_of_view(
         configuration = library.get_design_configuration(instantiation.design_configuration_ref.vlnv)
         if configuration is None or configuration.design_ref is None:
             raise ValueError(f"{where}: design configuration {instantiation.design_configuration_ref} is not usable")
+        if direct is not None and direct.design_ref.vlnv != configuration.design_ref.vlnv:
+            raise ValueError(
+                f"{where}: view {view.name!r} names design {direct.design_ref.vlnv}, "
+                f"and its design configuration is for {configuration.design_ref.vlnv}"
+            )
         design = library.get_design(configuration.design_ref.vlnv)
         if design is None:
             raise ValueError(f"{where}: design {configuration.design_ref} is not in the library")
-        return design, configuration
-    if view.design_instantiation_ref:
-        instantiation = next((i for i in model.design_instantiations if i.name == view.design_instantiation_ref), None)
-        if instantiation is None:
-            raise ValueError(f"{where}: view {view.name!r} refers to a missing design instantiation")
-        _refuse_override_on(instantiation.design_ref, where)
-        design = library.get_design(instantiation.design_ref.vlnv)
+        return design, configuration, values
+    if direct is not None:
+        design = library.get_design(direct.design_ref.vlnv)
         if design is None:
-            raise ValueError(f"{where}: design {instantiation.design_ref} is not in the library")
-        return design, None
+            raise ValueError(f"{where}: design {direct.design_ref} is not in the library")
+        return design, None, values
     return None
 
 
@@ -576,14 +588,22 @@ def _find_top_component(linked: LinkedDesign, top: Optional[str]) -> Optional[ip
     return found[0] if found else None
 
 
-def _resolver(parameters: Iterable[ipxact.Parameter], overrides: Dict[str, str]) -> _Resolver:
-    def final(parameter: ipxact.Parameter) -> ipxact.Parameter:
-        text = overrides.get(parameter.parameter_id, _text(parameter.value))
-        if parameter.parameter_id not in overrides and text not in _BOOLEANS:
-            return parameter
-        return dataclasses.replace(parameter, value=ipxact.Expression(_BOOLEANS.get(text, text)))
+def _overridden(parameter: ipxact.Parameter, overrides: Dict[str, str]) -> ipxact.Parameter:
+    """The parameter with its value in this place: an override replaces it, keeping the parameter's type."""
+    text = overrides.get(parameter.parameter_id, _text(parameter.value))
+    if parameter.parameter_id not in overrides and text not in _BOOLEANS:
+        return parameter
+    return dataclasses.replace(parameter, value=ipxact.Expression(_BOOLEANS.get(text, text)))
 
-    return parameter_resolver(final(parameter) for parameter in parameters)
+
+def _resolver(parameters: Iterable[ipxact.Parameter], overrides: Dict[str, str]) -> _Resolver:
+    return parameter_resolver(_overridden(parameter, overrides) for parameter in parameters)
+
+
+def _check_overrides_name_parameters(overrides: Dict[str, object], parameters: Iterable[ipxact.Parameter], where: str, what: str) -> None:
+    unknown = sorted(set(overrides) - {p.parameter_id for p in parameters if p.parameter_id})
+    if unknown:
+        raise ValueError(f"{where}: parameter overrides name no parameter of {what}: {', '.join(unknown)}")
 
 
 def _derived_in_the_hdl(text: str, resolve: _Resolver, module_names: Set[str]) -> bool:
@@ -766,7 +786,13 @@ def _build_port(
     if port.transactional is not None:
         return None  # a TLM port: an RTL view of the component does not have it
     if port.arrays:
-        raise ValueError(f"{where}: unpacked array ports are not supported yet")
+        if is_top:
+            raise ValueError(f"{where}: unpacked array ports are not supported yet")
+        # An instance's output can still be left open, which needs nothing of its shape.
+        built = _build_port(owner, dataclasses.replace(port, arrays=[]), resolve, is_top, view)
+        if built is not None:
+            built.unsupported = "unpacked array ports are not supported yet, except an output left open"
+        return built
     if port.wire is not None:
         direction, vectors, type_name = port.wire.direction, port.wire.vectors, _wire_type(port.wire, view)
     elif port.structured is not None and port.structured.struct_type in ("struct", "union"):
@@ -888,14 +914,37 @@ class _ModuleBuilder:
         top_component: Optional[ipxact.Component],
         must_use_common: bool = True,
         top_view: Optional[ipxact.View] = None,
+        top_overrides: Optional[Dict[str, str]] = None,
+        design_values: Optional[Dict[str, object]] = None,
+        module_name: Optional[str] = None,
+        variants: Optional[Dict[Tuple[object, ...], str]] = None,
     ) -> None:
         self.linked = linked
         self.common = list(common)
         self.top_component = top_component
         self.top_view = top_view
         self.must_use_common = must_use_common
+        self.module_name = module_name
+        self.variants = variants if variants is not None else {}
+        where = f"top component {top_component.vlnv}" if top_component else f"design {linked.vlnv}"
+        # The component's parameters, with the values of the instance this module is generated for (D26).
+        component_parameters = list(top_component.parameters) if top_component else []
+        top_overrides = top_overrides or {}
+        _check_overrides_name_parameters(top_overrides, component_parameters, where, "the component")
+        component_parameters = [_overridden(p, top_overrides) for p in component_parameters]
+        self.top_overrides = top_overrides
+        self.component_resolve = _resolver(component_parameters, {})
+        # The values the component's reference to the design gives the design's parameters, worked out where
+        # the reference is written: in the component (D25).
+        design_parameters = list(linked.design.parameters)
+        _check_overrides_name_parameters(design_values or {}, design_parameters, f"{where}: its reference to design {linked.vlnv}", "that design")
+        names = {p.parameter_id: p.name for p in design_parameters}
+        values = {
+            key: _resolved_text(_text(value), self.component_resolve, f"{where}: the value for design parameter {names[key]}")
+            for key, value in (design_values or {}).items()
+        }
         # What an expression written in the design can see: the design's parameters first.
-        scope = _nearest_first(linked.design.parameters, top_component.parameters if top_component else [])
+        scope = _nearest_first([_overridden(p, values) for p in design_parameters], component_parameters)
         self.design_resolve = _resolver(scope, {})
         # A value in a design configuration sees that configuration's parameters before those.
         configuration = linked.design_configuration
@@ -957,10 +1006,12 @@ class _ModuleBuilder:
         if instantiation is not None and instantiation.module_parameters:
             raise ValueError(f"{where}: module parameters on the top component are not supported yet")
         self.module = instantiation.module_name if instantiation is not None and instantiation.module_name else component.vlnv.name
+        if self.module_name:  # the version of it for one set of parameter values (D26)
+            self.module = self.module_name
         _check_identifier(self.module, f"{where}: module name")
         self.top.name = self.top.module = self.module
         self.top.view = view
-        resolve = _resolver(component.parameters, {})
+        resolve = self.component_resolve
         self.top.resolve = resolve
         for port in component.model.ports:
             built = _build_port(self.module, port, resolve, is_top=True, view=view)
@@ -998,9 +1049,12 @@ class _ModuleBuilder:
 
         design = _design_of_view(library, component, view, where)
         if design is not None:
-            if overrides:
-                raise ValueError(f"{where}: parameter overrides on a hierarchical instance are not supported yet")
-            self.children.append(_Child(component, design[0], design[1], view))
+            version = self._module_for_values(component, view, module, overrides, where)
+            if version == module:  # values that change nothing: the module as it is
+                self.children.append(_Child(component, design[0], design[1], view))
+            else:
+                self.children.append(_Child(component, design[0], design[1], view, overrides, version))
+                module = version
 
         ports: Dict[str, _Port] = {}
         skipped: Set[str] = set()
@@ -1014,7 +1068,8 @@ class _ModuleBuilder:
         self.instances[name] = _Instance(
             name,
             module,
-            _instance_parameters(where, parameters, instantiation, overrides, resolve, given),
+            # A hierarchical instance's values go into the module generated for it, not on the instance.
+            _instance_parameters(where, parameters, instantiation, {} if design is not None else overrides, resolve, given),
             ports,
             skipped,
             resolve,
@@ -1026,6 +1081,36 @@ class _ModuleBuilder:
             view,
             design is not None,
         )
+
+    def _module_for_values(
+        self, component: ipxact.Component, view: Optional[ipxact.View], base: str, overrides: Dict[str, str], where: str
+    ) -> str:
+        """The module a hierarchical instance needs (D26). The generated modules take no parameters, as every
+        value in them is worked out, so a set of values that changes any parameter gets a module of its own:
+        `<module>_1`, `<module>_2`, ... in the order they turn up. Values that change nothing keep the module."""
+        if not overrides:
+            return base
+        _check_overrides_name_parameters(overrides, component.parameters, where, f"{component.vlnv}")
+        before, after = _resolver(component.parameters, {}), _resolver(component.parameters, overrides)
+
+        def value(parameter: ipxact.Parameter, resolve: _Resolver) -> str:
+            final = resolve(parameter.parameter_id) if parameter.parameter_id else parameter
+            try:
+                return _worked_out(final, resolve)
+            except (ExpressionError, ValueError, OverflowError, MemoryError, RecursionError):
+                return _resolved_text(_text(final.value), resolve, f"{where}: parameter {parameter.name}", keep_unknown=True)
+
+        values = tuple((p.name, value(p, after)) for p in component.parameters)
+        if values == tuple((p.name, value(p, before)) for p in component.parameters):
+            return base
+        key = (str(component.vlnv), view.name if view is not None else None, values)
+        if key not in self.variants:
+            taken = set(self.variants.values())
+            number = 1
+            while f"{base}_{number}" in taken:
+                number += 1
+            self.variants[key] = f"{base}_{number}"
+        return self.variants[key]
 
     def _configured_view(self, linked_instance) -> Tuple[Optional[ipxact.View], Optional[ipxact.ViewConfiguration]]:
         configuration_document = self.linked.design_configuration
@@ -1091,6 +1176,8 @@ class _ModuleBuilder:
         port = owner.ports.get(port_name)
         if port is None:
             raise ValueError(f"{where}: {owner.name} has no port {port_name!r}")
+        if port.unsupported:
+            raise ValueError(f"{where}: {port.label}: {port.unsupported}")
         if sub_port_refs:
             if part_select is not None or any(r.part_select is not None for r in sub_port_refs):
                 raise ValueError(f"{where}: a part select on a subPort is not supported yet")
@@ -1234,6 +1321,46 @@ class _ModuleBuilder:
             raise ValueError(f"{where}: ascending logical range [{left}:{right}] on {name!r} is not supported yet")
         return left, right
 
+    @staticmethod
+    def _check_within_width(
+        logical: ipxact.AbstractionPort,
+        mode: ipxact.InterfaceMode,
+        bounds: Optional[_Bounds],
+        terminal: _Terminal,
+        resolve_abstraction: _Resolver,
+        where: str,
+    ) -> None:
+        """SCR 6.19: the logical bits a port map takes lie within the width its abstraction gives the logical port
+        in that mode, where it gives one. With no logical range, a wire port takes [its width - 1:0] (B.1.7 b)).
+        Checked only where bits are picked by number (D29): ends that map whole ports of one width pick none, and an
+        abstraction's width left at its default then changes nothing. Checking the SCRs is XactFlow's part."""
+        wire = logical.wire
+        sides = {
+            ipxact.InterfaceMode.INITIATOR: wire.on_initiator if wire else None,
+            ipxact.InterfaceMode.MIRRORED_INITIATOR: wire.on_initiator if wire else None,
+            ipxact.InterfaceMode.TARGET: wire.on_target if wire else None,
+            ipxact.InterfaceMode.MIRRORED_TARGET: wire.on_target if wire else None,
+        }
+        side = sides.get(mode)
+        if side is None or side.width is None:
+            return
+        try:
+            width = _number(side.width, resolve_abstraction, where)
+        except ValueError:
+            return  # a width it can't work out here: nothing to hold the range to
+        if bounds is not None:
+            if max(bounds) >= width:
+                raise ValueError(
+                    f"{where}: logical range [{bounds[0]}:{bounds[1]}] of {logical.logical_name!r} on {terminal.port.label} "
+                    f"goes past its width in the abstraction, {width} bits (SCR 6.19)"
+                )
+        elif terminal.width is not None and terminal.width > width:
+            raise ValueError(
+                f"{where}: {terminal.port.label}{terminal.select} is {terminal.width} bits, mapped to {logical.logical_name!r} "
+                f"with no logical range, which makes it logical bits [{terminal.width - 1}:0]; the abstraction gives it "
+                f"{width} (B.1.7 b), SCR 6.19)"
+            )
+
     def _end_would_drive(self, logical: ipxact.AbstractionPort, owner: _Instance, mode: ipxact.InterfaceMode) -> bool:
         """Whether an end with this mode is on the driving side of a logical port. A tie-off there competes
         with a real driver, where one on a receiving end only says that end has nothing to connect."""
@@ -1255,6 +1382,7 @@ class _ModuleBuilder:
     ) -> None:
         name = logical.logical_name
         mapped: List[Tuple[_Terminal, Optional[_Bounds]]] = []
+        modes: List[ipxact.InterfaceMode] = []  # the mode of each mapped end
         whole_ties: List[Tuple[int, str]] = []
         sliced_ties: List[Tuple[int, _Bounds, str, bool]] = []
         tied_in_a_drivers_place: List[str] = []
@@ -1284,6 +1412,7 @@ class _ModuleBuilder:
                 )
                 if terminal is not None:
                     mapped.append((terminal, bounds))
+                    modes.append(mode)
 
         if len({value for value, _ in whole_ties}) > 1 or (whole_ties and sliced_ties):
             raise ValueError(f"{where}: logical port {name!r} is tied off more than one way")
@@ -1301,7 +1430,16 @@ class _ModuleBuilder:
         elif wire is not None and wire.default_value is not None and not sliced_ties:
             constant = (_number(wire.default_value, resolve_abstraction, where, constant=True), _ABSTRACTION_DEFAULT)
 
-        if sliced_ties or any(bounds is not None or t.port.direction is _INOUT for t, bounds in mapped):
+        # IEEE 1685-2022 B.1.7 b): with no logical range, a wire port maps logical bits [its width - 1:0], so ends
+        # of different widths share only their low logical bits. The net connects them bit by bit, and refuses a
+        # bit read that no end drives, which the standard leaves open (D29).
+        unranged = {t.width for t, bounds in mapped if bounds is None}
+        uneven = len(unranged) > 1 and None not in unranged
+        if uneven or any(bounds is not None for _, bounds in mapped):
+            # Bits are picked by their logical number here, so the numbers have to be ones the logical port has.
+            for (terminal, bounds), mode in zip(mapped, modes):
+                self._check_within_width(logical, mode, bounds, terminal, resolve_abstraction, where)
+        if sliced_ties or uneven or any(bounds is not None or t.port.direction is _INOUT for t, bounds in mapped):
             self._wire_through_net(block, where, f"{connection}_{name}", name, mapped, constant, sliced_ties)
             return
         drivers = [t for t, _ in mapped if t.port.direction is _OUT]
@@ -1485,6 +1623,8 @@ class _ModuleBuilder:
         IEEE 1685-2022 Table C.2: the port's own default wins over its abstraction's, and the
         abstraction's still applies to a port that has none of its own."""
         port = terminal.port
+        if port.width is None:
+            return self._whole_default(terminal, where)
         bits = self._port_default_bits(port, where)
         from_abstraction = self._abstraction_default_on(terminal)
         if bits is None:
@@ -1498,6 +1638,35 @@ class _ModuleBuilder:
             self._drop_abstraction_default(from_abstraction)
         ascending = bool(port.vectors) and port.vectors[0][0] < port.vectors[0][1]
         return sum(bits[key] << position for position, key in enumerate(sorted(terminal.keys, reverse=ascending)))
+
+    def _whole_default(self, terminal: _Terminal, where: str) -> Optional[int]:
+        """The default of a port whose width only the compiler knows, such as a struct or an enum, tied whole
+        (D27). It takes no bits to read: one default for the whole port is one constant, cast to the type and
+        checked by the compiler like any other (D20, D21). A default given in parts would need its bits."""
+        port = terminal.port
+        if terminal.select:
+            raise ValueError(f"{where}: tying part of {port.label}, a {port.declaration}, to its default is not supported yet")
+        owner, drivers = self._default_drivers(port)
+        from_abstraction = self._abstraction_default_on(terminal)
+        if not drivers:
+            if from_abstraction is not None:
+                return None
+            raise ValueError(f"{where}: tied to 'default', but {port.label} has no default value")
+        if len(drivers) > 1 or drivers[0].range is not None:
+            raise ValueError(f"{where}: tying {port.label}, a {port.declaration}, to a default given in parts is not supported yet")
+        value = _number(drivers[0].default_value, owner.resolve, where, constant=True)
+        if from_abstraction is not None:
+            self._drop_abstraction_default(from_abstraction)
+        return value
+
+    def _default_drivers(self, port: _Port) -> Tuple[_Instance, List[ipxact.Driver]]:
+        """The drivers with a default value that apply to a port in its owner's view."""
+        owner = self.top if port.is_top else self.instances[port.instance]
+        component = self.top_component if port.is_top else self.linked.instances[port.instance].component
+        if component is None:
+            return owner, []
+        wire = next((p.wire for p in component.model.ports if p.name == port.name), None)
+        return owner, [d for d in for_view(wire.drivers if wire is not None else [], owner.view) if d.default_value is not None]
 
     def _abstraction_default_on(self, terminal: _Terminal) -> Optional[Tuple[_Block, _Assign]]:
         for entry in self.abstraction_defaults:
@@ -1515,12 +1684,10 @@ class _ModuleBuilder:
     def _port_default_bits(self, port: _Port, where: str) -> Optional[Dict[object, int]]:
         """Each bit of a port's own default value, by its index in the port. A driver can cover part
         of the port, and can apply to some views only. None when the port has no default here."""
-        owner = self.top if port.is_top else self.instances[port.instance]
         component = self.top_component if port.is_top else self.linked.instances[port.instance].component
         if component is None:  # a port of the module with no hierarchical component: only the design defines it
             return None
-        wire = next(p.wire for p in component.model.ports if p.name == port.name)
-        drivers = [d for d in for_view(wire.drivers if wire is not None else [], owner.view) if d.default_value is not None]
+        owner, drivers = self._default_drivers(port)
         if not drivers:
             return None
         if port.width is None:
@@ -1589,6 +1756,11 @@ class _ModuleBuilder:
             for port in instance.ports.values():
                 if port.net is not None:
                     continue
+                if port.unsupported:
+                    # Left open it needs no net; an input must be driven, and a module port declared.
+                    if port.direction is _IN or self.top_component is None:
+                        raise ValueError(f"{port.label}: {port.unsupported}, in a module whose ports a component defines")
+                    continue
                 if port.direction is _IN:
                     self._name_input(port)
                 elif port.direction is _INOUT:
@@ -1644,7 +1816,12 @@ class _ModuleBuilder:
 
     def _render(self) -> str:
         labels: Set[str] = set()  # generate blocks share the module's one scope with nets, ports and instances
-        lines = [self.header, ""]
+        lines = [self.header]
+        if self.module_name and self.top_component is not None and self.top_overrides:
+            names = {p.parameter_id: p.name for p in self.top_component.parameters}
+            given = ", ".join(f"{names[key]} = {value}" for key, value in self.top_overrides.items())
+            lines.append(f"// The version of {self.top_component.vlnv} with {given}.")
+        lines.append("")
         lines.extend(self._render_header())
         if self.wires:
             width = max(len(declaration) for declaration in self.wires.values())
@@ -1741,17 +1918,33 @@ def _generate(
     parents: Tuple[str, ...],
     written_elsewhere: Dict[str, str],
     top_view: Optional[ipxact.View] = None,
+    top_overrides: Optional[Dict[str, str]] = None,
+    module_name: Optional[str] = None,
+    variants: Optional[Dict[Tuple[object, ...], str]] = None,
 ) -> None:
     _check_linked(linked)
     top_component = _find_top_component(linked, top)
+    design_values: Dict[str, object] = {}
     if top_component is not None:
         view = top_view or _view_holding_design(linked.library, top_component, linked.vlnv)
         held = _design_of_view(linked.library, top_component, view, f"top component {top_component.vlnv}")
+        if held is not None:
+            design_values = held[2]
         # A configuration the top component holds applies at the top, as it does further down.
         if linked.design_configuration is None and held is not None and held[1] is not None:
             linked = link(linked.design, linked.library, held[1])
             _check_linked(linked)
-    builder = _ModuleBuilder(linked, common, top_component, must_use_common=not parents, top_view=top_view)
+    builder = _ModuleBuilder(
+        linked,
+        common,
+        top_component,
+        must_use_common=not parents,
+        top_view=top_view,
+        top_overrides=top_overrides,
+        design_values=design_values,
+        module_name=module_name,
+        variants=variants,
+    )
     text = builder.build()
 
     file_name = f"{builder.module}.sv"
@@ -1773,7 +1966,18 @@ def _generate(
         if name in parents or name == str(linked.vlnv):
             raise ValueError(f"design {name} contains itself: {' -> '.join((*parents, str(linked.vlnv), name))}")
         sub_linked = link(child.design, linked.library, child.configuration)
-        _generate(sub_linked, common, str(child.component.vlnv), files, (*parents, str(linked.vlnv)), written_elsewhere, child.view)
+        _generate(
+            sub_linked,
+            common,
+            str(child.component.vlnv),
+            files,
+            (*parents, str(linked.vlnv)),
+            written_elsewhere,
+            child.view,
+            child.overrides,
+            child.module or None,
+            builder.variants,
+        )
 
 
 def generate_files(linked: LinkedDesign, common: Sequence[str] = (), top: Optional[str] = None) -> Dict[str, str]:

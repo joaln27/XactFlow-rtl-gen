@@ -111,7 +111,13 @@ the component can say which ports those are.
 - **A view's choices:** an instance uses the abstraction type, driver and type definitions of its view.
 - **A design configuration:** the one given to `link()`, else the one the hierarchical component's view
   holds, at any depth.
-- **A hierarchical instance:** its view holds a design, which gets its own module.
+- **A hierarchical instance:** its view holds a design, which gets its own module. The generated modules take
+  no parameters, as every value in them is worked out, so an instance whose overrides change a parameter of
+  its component gets a module of its own, `<module>_1`, `<module>_2`, ..., one for each set of values, with
+  those values all the way down its design (D26). Its first line says which values it is for.
+- **A design's parameters:** a component's reference to the design it holds can give them values, worked out
+  in the component, so a top component or a hierarchical instance sets its design's parameters this way. That
+  works when the view names a design configuration as well, as Kactus2 writes it (D25).
 - **Parameters:** every module parameter of the view is written, with its value in this design, because
   the HDL's own default can differ from the component's. The exception is one worked out only from the
   instance's other module parameters, as an imported HDL default such as `B = A + 8'd100` is: the HDL works
@@ -128,6 +134,10 @@ the component can say which ports those are.
   an enum, a constant or an inverted value is cast to it, `mode_pkg::mode_e'(2)`. Where only the compiler knows
   the width, the module has it check that the constant fits, with `$bits` and `$error` at elaboration. slang,
   Verilator and Icarus 13 run that check; Icarus 12 skips it.
+- **A port map with no logical range:** on a wire port it takes logical bits [the port's width - 1:0], as Annex
+  B.1.7 of the standard says, so an end narrower than the others gets the low bits, such as a 12-bit memory
+  address on a 32-bit bus. A bit read that no end drives is refused, as the standard doesn't say what it gets.
+  Where bits are picked by number, they have to lie within the abstraction's width for the port (SCR 6.19, D29).
 - **A logical port with no driver on its bus:** the port map's `logicalTieOff`, else the abstraction's
   `defaultValue`, else its receivers stay unconnected. Tie-offs can each cover a logical range, next to
   bits a port drives. An abstraction's default reaches an inout only if nothing else on the bus connects to it.
@@ -178,17 +188,22 @@ It raises `ValueError` rather than writing wrong RTL:
 
 - link errors, including ad hoc references `link()` drops without a diagnostic;
 - width mismatches, evaluated after parameter overrides, which neither `archidesc` nor the SCR checks
-  catch today, including through an inout, and for a struct or sub-port when its sub-ports are declared;
+  catch today, including through an inout, and for a struct or sub-port when its sub-ports are declared (on a
+  bus, ends mapped with no logical range may differ, D29);
 - a whole port of a type only the compiler knows, such as an enum or a struct with no sub-ports listed,
-  connected to anything but the same type or a constant, and tied to its own default value;
+  connected to anything but the same type or a constant, or tied to a default given in parts (one default for
+  the whole port is cast and checked like any constant, D27);
 - a constant or an inversion into an unpacked struct;
 - an input driven twice or only partly, a logical port with two drivers, two different tie-offs, or a real
   driver and a tie-off on an end that would drive it, and logical bits read but never driven;
 - a top-level output nothing drives;
 - a constant that does not fit its port, positive or negative, which would silently lose bits (for a type only the
   compiler knows the width of, the compiler refuses it, through the check above);
-- parameter overrides on a reference to a design, a design configuration, a bus or an abstraction, which
-  nothing here would apply;
+- parameter overrides on a reference to a design configuration, a bus or an abstraction, which nothing here
+  would apply;
+- a view that names a design and a design configuration for another design;
+- a value on a design reference, or on a hierarchical instance, for a parameter that design or component
+  does not have;
 - a name in a parameter's value that no parameter in scope explains, and a typedef whose name has no package,
   which a generated module could not see;
 - address windows that overlap on one decoder or pass the end of their bus's address space, a window with no
@@ -205,11 +220,10 @@ It raises `ValueError` rather than writing wrong RTL:
 - **Decoding is not generated.** The address map is data for a decoder that already exists. Nothing writes
   the crossbar itself.
 - **Each error below is reported, not silently skipped.** Not supported yet: monitor interconnections,
-  unpacked arrays, interface ports, indexed part selects, a part select on an inout, a subPort, a struct or
+  unpacked arrays (an instance's output that nothing connects is left open, D28), interface ports, indexed part selects, a part select on an inout, a subPort, a struct or
   a port with several dimensions, a part select running the other way from its port, a sub-port of an array
   of structs, an abstraction's default next to tie-offs for some of its bits, an ascending logical range, an inverted inout, two inouts of the module on one net, logical slices on an inout of the module
-  not declared from bit 0, abstractors, module parameters on the top component, and parameter overrides on a
-  hierarchical instance.
+  not declared from bit 0, abstractors, and module parameters on the top component.
 - **A sub-port of a struct with no sub-ports listed cannot be width-checked.** `xactflow-sv` leaves them out.
   Nor is its type known, so a member that is an enum gets no cast, and slang and Verilator reject what drives it.
   Listing the sub-ports in the component fixes both (`docs/findings.md`, F2).
