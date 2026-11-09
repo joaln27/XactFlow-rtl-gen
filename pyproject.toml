@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xactflow-rtl"
+dynamic = ["version"]
+description = "XactFlow exporter plugin that generates a SystemVerilog top-level module from a linked IP-XACT design."
+readme = "README.md"
+license = "LGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Joonatan Alanampa"},
+]
+requires-python = ">=3.9"
+dependencies = [
+    "xactflow>=0.3.0,<0.4",
+    "ipxact-compiler>=0.2.0",
+]
+keywords = [
+    "IP-XACT", "IEEE 1685", "RTL",
+    "XactFlow", "SystemVerilog", "Exporter",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pyslang>=10.0.0",
+    "xactflow-archidesc>=0.1.1",
+    "xactflow-design>=0.2.0",
+]
+
+[project.entry-points."xactflow.exporters"]
+rtl = "xactflow_rtl:RtlExporter"
+
+[tool.setuptools.dynamic]
+version = {attr = "xactflow_rtl.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+xactflow_rtl = ["py.typed"]

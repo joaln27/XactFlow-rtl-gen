@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The module name differs from the VLNV name on purpose, to test which one gets instantiated. -->
+<ipxact:component xmlns:ipxact="http://www.accellera.org/XMLSchema/IPXACT/1685-2022">
+  <ipxact:vendor>test.org</ipxact:vendor>
+  <ipxact:library>ip</ipxact:library>
+  <ipxact:name>master</ipxact:name>
+  <ipxact:version>1.0</ipxact:version>
+  <ipxact:busInterfaces>
+    <ipxact:busInterface>
+      <ipxact:name>bus</ipxact:name>
+      <ipxact:busType vendor="test.org" library="bus" name="sbus" version="1.0"/>
+      <ipxact:abstractionTypes>
+        <ipxact:abstractionType>
+          <ipxact:abstractionRef vendor="test.org" library="bus" name="sbus_rtl" version="1.0"/>
+          <ipxact:portMaps>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>CLK</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>clk_i</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>VALID</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>valid_o</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>WDATA</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>wdata_o</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>RDATA</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>rdata_i</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>READY</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>ready_i</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>ERR</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>err_i</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+            <ipxact:portMap><ipxact:logicalPort><ipxact:name>DEBUG</ipxact:name></ipxact:logicalPort><ipxact:physicalPort><ipxact:name>debug_o</ipxact:name></ipxact:physicalPort></ipxact:portMap>
+          </ipxact:portMaps>
+        </ipxact:abstractionType>
+      </ipxact:abstractionTypes>
+      <ipxact:initiator/>
+    </ipxact:busInterface>
+  </ipxact:busInterfaces>
+  <ipxact:model>
+    <ipxact:views>
+      <ipxact:view>
+        <ipxact:name>rtl</ipxact:name>
+        <ipxact:componentInstantiationRef>rtl_inst</ipxact:componentInstantiationRef>
+      </ipxact:view>
+    </ipxact:views>
+    <ipxact:instantiations>
+      <ipxact:componentInstantiation>
+        <ipxact:name>rtl_inst</ipxact:name>
+        <ipxact:moduleName>master_core</ipxact:moduleName>
+      </ipxact:componentInstantiation>
+    </ipxact:instantiations>
+    <ipxact:ports>
+      <ipxact:port><ipxact:name>clk_i</ipxact:name><ipxact:wire><ipxact:direction>in</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>rst_ni</ipxact:name><ipxact:wire><ipxact:direction>in</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>valid_o</ipxact:name><ipxact:wire><ipxact:direction>out</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>wdata_o</ipxact:name><ipxact:wire><ipxact:direction>out</ipxact:direction><ipxact:vectors><ipxact:vector><ipxact:left>7</ipxact:left><ipxact:right>0</ipxact:right></ipxact:vector></ipxact:vectors></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>rdata_i</ipxact:name><ipxact:wire><ipxact:direction>in</ipxact:direction><ipxact:vectors><ipxact:vector><ipxact:left>7</ipxact:left><ipxact:right>0</ipxact:right></ipxact:vector></ipxact:vectors></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>ready_i</ipxact:name><ipxact:wire><ipxact:direction>in</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>err_i</ipxact:name><ipxact:wire><ipxact:direction>in</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>debug_o</ipxact:name><ipxact:wire><ipxact:direction>out</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>irq_i</ipxact:name><ipxact:wire><ipxact:direction>in</ipxact:direction></ipxact:wire></ipxact:port>
+      <ipxact:port><ipxact:name>result_o</ipxact:name><ipxact:wire><ipxact:direction>out</ipxact:direction><ipxact:vectors><ipxact:vector><ipxact:left>7</ipxact:left><ipxact:right>0</ipxact:right></ipxact:vector></ipxact:vectors></ipxact:wire></ipxact:port>
+    </ipxact:ports>
+  </ipxact:model>
+</ipxact:component>

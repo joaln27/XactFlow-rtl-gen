@@ -1,0 +1,5 @@
+# The source distribution carries what it takes to run the tests and read the decisions.
+graft tests
+graft docs
+include requirements-dev.txt pytest.ini
+global-exclude __pycache__ *.py[cod]

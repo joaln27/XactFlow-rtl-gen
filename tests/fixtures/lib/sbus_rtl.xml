@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A small bus with one of each case the wiring has to handle:
+     VALID, WDATA, RDATA: plain signals, READY: has a default, ERR: tied off by the target,
+     CLK: requires a driver, so it has to come from outside the bus. -->
+<ipxact:abstractionDefinition xmlns:ipxact="http://www.accellera.org/XMLSchema/IPXACT/1685-2022">
+  <ipxact:vendor>test.org</ipxact:vendor>
+  <ipxact:library>bus</ipxact:library>
+  <ipxact:name>sbus_rtl</ipxact:name>
+  <ipxact:version>1.0</ipxact:version>
+  <ipxact:busType vendor="test.org" library="bus" name="sbus" version="1.0"/>
+  <ipxact:ports>
+    <ipxact:port>
+      <ipxact:logicalName>CLK</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:qualifier><ipxact:isClock>true</ipxact:isClock></ipxact:qualifier>
+        <ipxact:onInitiator><ipxact:direction>in</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:direction>in</ipxact:direction></ipxact:onTarget>
+        <ipxact:requiresDriver driverType="clock">true</ipxact:requiresDriver>
+      </ipxact:wire>
+    </ipxact:port>
+    <ipxact:port>
+      <ipxact:logicalName>VALID</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:onInitiator><ipxact:direction>out</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:direction>in</ipxact:direction></ipxact:onTarget>
+      </ipxact:wire>
+    </ipxact:port>
+    <ipxact:port>
+      <ipxact:logicalName>WDATA</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:onInitiator><ipxact:width>8</ipxact:width><ipxact:direction>out</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:width>8</ipxact:width><ipxact:direction>in</ipxact:direction></ipxact:onTarget>
+      </ipxact:wire>
+    </ipxact:port>
+    <ipxact:port>
+      <ipxact:logicalName>RDATA</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:onInitiator><ipxact:width>8</ipxact:width><ipxact:direction>in</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:width>8</ipxact:width><ipxact:direction>out</ipxact:direction></ipxact:onTarget>
+      </ipxact:wire>
+    </ipxact:port>
+    <ipxact:port>
+      <ipxact:logicalName>READY</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:onInitiator><ipxact:direction>in</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:presence>optional</ipxact:presence><ipxact:direction>out</ipxact:direction></ipxact:onTarget>
+        <ipxact:defaultValue>1</ipxact:defaultValue>
+      </ipxact:wire>
+    </ipxact:port>
+    <ipxact:port>
+      <ipxact:logicalName>ERR</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:onInitiator><ipxact:direction>in</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:presence>optional</ipxact:presence><ipxact:direction>out</ipxact:direction></ipxact:onTarget>
+      </ipxact:wire>
+    </ipxact:port>
+    <ipxact:port>
+      <ipxact:logicalName>DEBUG</ipxact:logicalName>
+      <ipxact:wire>
+        <ipxact:onInitiator><ipxact:presence>optional</ipxact:presence><ipxact:direction>out</ipxact:direction></ipxact:onInitiator>
+        <ipxact:onTarget><ipxact:presence>optional</ipxact:presence><ipxact:direction>in</ipxact:direction></ipxact:onTarget>
+      </ipxact:wire>
+    </ipxact:port>
+  </ipxact:ports>
+</ipxact:abstractionDefinition>
