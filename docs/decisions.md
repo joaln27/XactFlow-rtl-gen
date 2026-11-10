@@ -270,7 +270,7 @@ rounds are an adversarial AI agent attacking it.
   names.
 
 ## D21. Where only the compiler knows a width, the compiler checks the constant
-*2026-11-09 · active*
+*2026-11-09 · active · D40 closes the two gaps under "How strong"*
 
 - **Decision:** a constant tied to a port or sub-port whose width the exporter can't know, such as an enum or a
   struct member nothing lists, comes with an elaboration-time check in the generated module:
@@ -386,8 +386,8 @@ rounds are an adversarial AI agent attacking it.
   - **With D36,** later that day: the two components keep the module parameters `xactflow-sv` imported, and
     Croc's testbench, which instantiates `croc_soc #(.GpioCount(32))`, is used as it is, where the test had
     needed a copy without the parameter. The modules differ from those above only in the parameters they
-    declare and check, and in the values `croc_soc` gives its `croc_domain_1`. Given a `GpioCount` of 16, the
-    testbench is refused by the module's own check.
+    declare and check, and in the values `croc_soc` gives its `croc_domain_1`. The nine programs pass on them
+    as well, with the same output. Given a `GpioCount` of 16, the testbench is refused by the module's own check.
 - **Topwrap's examples, the same day:** five small designs whose 1685-2022 files Antmicro's Topwrap writes, tried as
   a third tool's IP-XACT. All five are refused, four of them for what is in the files: instance names that are
   no names (`2mux`, `4-bit counter`), a bus definition the library lacks, and a port whose width ignores its
@@ -603,7 +603,7 @@ rounds are an adversarial AI agent attacking it.
   set of values (D11), and another set still needs another module (D26). The guide's netlist passes the
   expression on, `B #(.pB((pA*4)+7))`; this one writes `B #(.pB(19))` and refuses a `pA` other than 3.
 - **How strong:** as D21. slang and Icarus 13 stop. Verilator reports it as a warning, `USERERROR`, which stops
-  a build unless it runs with `-Wno-fatal`. Icarus 12 skips it.
+  a build unless it runs with `-Wno-fatal`. Icarus 12 skips it. D40 makes the simulation of those two stop.
 - **Refused:** a type parameter on a generated module; a `dataType` that is not a type's name, or a typedef
   without its package; a value that cannot be compared, such as an assignment pattern; a parameter named like
   a port or an instance of the module.
@@ -655,3 +655,21 @@ rounds are an adversarial AI agent attacking it.
 - **Considered:** always writing `<module>.f`, which adds a file to every output folder and may find a list
   written by hand in its way; IP-XACT file sets on a generated component, the standard's way and a larger step.
 - **Revisit if:** a build system integration, such as a SoCMake function, needs another form.
+
+## D40. A compiler's check also stops the simulation
+*2026-11-10 · active · strengthens D21 and D36*
+
+- **Decision:** each check the generated module gives the compiler has a second line with the same message,
+  `initial $fatal(1, "...")`, inside the same block:
+  `if (W !== 16) begin : W_as_generated $error("..."); initial $fatal(1, "..."); end`.
+- **Why:** D21 recorded two gaps. Verilator reports an elaboration-time `$error` as a warning, so a build with
+  `-Wno-fatal` goes on, and Icarus 12 skips such a line in a generate block. With D36 the first one matters
+  more: Croc builds with `-Wno-fatal`, so a testbench that gave `croc_soc` another `GpioCount` would have
+  printed one more warning and simulated the module generated for 32. With the second line that simulation
+  stops at time 0 with the message. `$fatal` in place of `$error` does not help: Verilator makes it a warning
+  too.
+- **Tried:** Verilator 5.022 with `-Wno-fatal` builds and then stops as the simulation starts; Icarus 13 does
+  the same once the `$error` line is taken out, which is how the tests see what Icarus 12 does.
+- **Considered:** something no tool compiles, such as an instance of a module that does not exist, which
+  Verilator looks up even in a branch that is not taken, so every build would fail.
+- **Revisit if:** a tool objects to an `initial` inside a generate block that is not taken.

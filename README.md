@@ -120,8 +120,12 @@ module croc_soc #(
 
     if (GpioCount !== 32) begin : GpioCount_as_generated
         $error("croc_soc is generated for GpioCount = 32, and was given another value");
+        initial $fatal(1, "croc_soc is generated for GpioCount = 32, and was given another value");
     end
 ```
+
+`$error` stops a compiler as it elaborates the module. One that goes on past it stops when the simulation
+starts, on the `$fatal` (D40).
 
 **Without one**, the design is all there is. An `externalPortReference` declares a port. A port no
 connection reaches becomes a top-level port, `<instance>_<port>`, or the shared `common` port, so
@@ -169,7 +173,8 @@ the component can say which ports those are.
 - **Constants on a net:** `'1` is all ones at that net's width. On a port or sub-port of a named type, such as
   an enum, a constant or an inverted value is cast to it, `mode_pkg::mode_e'(2)`. Where only the compiler knows
   the width, the module has it check that the constant fits, with `$bits` and `$error` at elaboration. slang,
-  Verilator and Icarus 13 run that check; Icarus 12 skips it.
+  Verilator and Icarus 13 stop there. Icarus 12 skips such a line, and Verilator with `-Wno-fatal` only reports
+  it: their simulation stops as it starts, on a `$fatal` under it (D40).
 - **A port map with no logical range:** on a wire port it takes logical bits [the port's width - 1:0], as Annex
   B.1.7 of the standard says, so an end narrower than the others gets the low bits, such as a 12-bit memory
   address on a 32-bit bus. A bit read that no end drives is refused, as the standard doesn't say what it gets.
@@ -270,8 +275,8 @@ It raises `ValueError` rather than writing wrong RTL:
   sub-port of an array of structs with no element picked, a constant into several elements of one, an abstraction's default next to tie-offs for some of its bits, an ascending logical range, an inverted inout, two inouts of the module on one net, logical slices on an inout of the module
   not declared from bit 0, abstractors, and type parameters on a generated module.
 - **A generated module's parameters do not configure it.** It is generated for one value of each, and another
-  value needs it generated again (D36). Verilator reports the module's own check of that as a warning, so a build
-  with `-Wno-fatal` goes on past it; Icarus 12 skips it.
+  value needs it generated again (D36). The module's own check of that stops a compiler, or else the simulation
+  as it starts (D40).
 - **A sub-port of a struct with no sub-ports listed cannot be width-checked.** `xactflow-sv` leaves them out.
   Nor is its type known, so a member that is an enum gets no cast, and slang and Verilator reject what drives it.
   Listing the sub-ports in the component fixes both (`docs/findings.md`, F2).
@@ -336,7 +341,7 @@ in `docs/decisions.md`). The scripts for these are kept outside this repository.
   elaborates in slang and lints in Verilator with the same messages, and each of the 3769 port bits traced has
   the same driver, and each of the 110 instance parameters the same value. Croc's firmware, nine programs run
   in Verilator, passes on both and prints the same lines at the same simulation times. The generated `croc_soc`
-  declares the parameter Croc's testbench gives it, so the testbench elaborates as it is.
+  declares the parameter Croc's testbench gives it, so the testbench is used as it is.
 
 ## Development
 

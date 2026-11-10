@@ -292,6 +292,26 @@ def simulate(tmp_path: Path, files: Dict[str, str], sources: Sequence[str], tb: 
     return subprocess.run(["vvp", str(binary)], check=True, capture_output=True, text=True).stdout
 
 
+def without_elaboration_checks(files: Dict[str, str]) -> Dict[str, str]:
+    """The generated files as a tool that goes on past an elaboration-time $error has them: Icarus 12 skips such
+    a line in a generate block, and Verilator told not to stop on warnings only reports it."""
+    return {name: "\n".join(line for line in text.splitlines() if "$error(" not in line) + "\n" for name, text in files.items()}
+
+
+def simulation_says(tmp_path: Path, files: Dict[str, str], sources: Sequence[str], tb: str, top: str = "tb") -> str:
+    """Like simulate(), for a simulation that may stop itself: everything it printed."""
+    paths = []
+    for name, text in [*in_compile_order(files), *[(f"ip{i}.sv", s) for i, s in enumerate(sources)], ("tb.sv", tb)]:
+        path = tmp_path / name
+        path.write_text(text)
+        paths.append(str(path))
+    binary = tmp_path / "sim.vvp"
+    compiled = subprocess.run(["iverilog", "-g2012", "-s", top, "-o", str(binary), *paths], capture_output=True, text=True)
+    assert compiled.returncode == 0, compiled.stderr
+    ran = subprocess.run(["vvp", str(binary)], capture_output=True, text=True)
+    return ran.stdout + ran.stderr
+
+
 def verilator_lint(tmp_path: Path, files: Dict[str, str], sources: Sequence[str], top: str) -> subprocess.CompletedProcess:
     paths = []
     for name, text in [*in_compile_order(files), *[(f"lint_ip{i}.sv", s) for i, s in enumerate(sources)]]:

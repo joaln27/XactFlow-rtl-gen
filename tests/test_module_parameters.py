@@ -25,9 +25,11 @@ from builders import (
     instance,
     passes,
     refused,
+    simulation_says,
     slang_errors,
     vlnv_ref,
     wire,
+    without_elaboration_checks,
 )
 
 _E = ipxact.Expression
@@ -122,6 +124,19 @@ def test_an_instance_written_by_hand_with_another_value_is_stopped_by_the_compil
     chip, chip_d = holder("chip", {"W": 16})
     files = files_of(chip_d, [chip, sized()])
     stops_every_tool(tmp_path, {**files, "sized.sv": SIZED}, by_hand("chip", given))
+
+
+@pytest.mark.skipif(not has_icarus, reason="needs Icarus Verilog")
+def test_a_tool_that_goes_on_past_the_check_stops_when_its_simulation_starts(tmp_path):
+    """D40. Taking the $error line out is how the Icarus at hand sees what Icarus 12 and `verilator -Wno-fatal`
+    do with it. The line under it then stops the simulation, with the same message."""
+    chip, chip_d = holder("chip", {"W": 16})
+    files = without_elaboration_checks(files_of(chip_d, [chip, sized()]))
+    assert "$error(" not in files["chip.sv"] and "initial $fatal(1, " in files["chip.sv"]
+    bench = 'module tb; wire [15:0] o; by_hand dut (.o(o)); initial begin #1; $display("ran on, o=%h", o); $finish; end endmodule\n'
+    stopped = simulation_says(tmp_path, files, [SIZED, by_hand("chip", ".W(8)")], bench)
+    assert "chip is generated for W = 16, and was given another value" in stopped and "ran on" not in stopped
+    assert "ran on, o=ffff" in simulation_says(tmp_path, files, [SIZED, by_hand("chip", ".W(16)")], bench)
 
 
 def test_a_module_with_parameters_and_no_ports(tmp_path):

@@ -202,6 +202,14 @@ def _sv_string(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
+def _compiler_check(condition: str, label: str, message: str) -> List[str]:
+    """What the generated module has the compiler check, where only the compiler can. `$error` stops a tool as
+    it elaborates the module. One that skips such a line, or reports it and goes on, stops when its simulation
+    starts, on the `$fatal` (D40)."""
+    text = _sv_string(message)
+    return [f"    if ({condition}) begin : {label}", f"        $error({text});", f"        initial $fatal(1, {text});", "    end"]
+
+
 def _sv_number(value: Union[int, float]) -> str:
     """A number as SystemVerilog. Past what an unsized literal is sure to hold it needs a size, and is
     signed, as an unsized decimal is, so that a minus sign in front of it still means a negative number."""
@@ -2233,9 +2241,8 @@ class _ModuleBuilder:
         for parameter in self.declared:
             value = parameter.value if _single_token(parameter.value) else f"({parameter.value})"
             message = f"{self.module} is generated for {parameter.name} = {parameter.value}, and was given another value"
-            lines.append(f"    if ({parameter.name} {parameter.differs} {value}) begin : {self._check_label(parameter.name + '_as_generated', labels)}")
-            lines.append(f"        $error({_sv_string(message)});")
-            lines.append("    end")
+            label = self._check_label(parameter.name + "_as_generated", labels)
+            lines.extend(_compiler_check(f"{parameter.name} {parameter.differs} {value}", label, message))
         lines.append("")
         return lines
 
@@ -2268,9 +2275,7 @@ class _ModuleBuilder:
                 sink = side(assign.sink)
                 label = self._check_label(re.sub(r"\W+", "_", sink).strip("_") + "_fits", labels)
                 message = f"{where}: the constant {value} does not fit in {assign.sink.port.label}{assign.sink.select}" + (f", a {assign.cast}" if assign.cast else "")
-                rows.append(f"    if ($bits({sink}) < {bits}) begin : {label}")
-                rows.append(f"        $error({_sv_string(message)});")
-                rows.append("    end")
+                rows.extend(_compiler_check(f"$bits({sink}) < {bits}", label, message))
         return rows
 
     @staticmethod
