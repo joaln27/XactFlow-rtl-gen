@@ -411,7 +411,7 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** XactFlow's `link()` starts applying these values itself; then take its result.
 
 ## D26. One module for each set of values a hierarchical instance is given
-*2026-11-09 · active · since D36 a generated module declares parameters, each for the one value it is generated for*
+*2026-11-09 · active · since D36 a generated module declares parameters, each for the one value it is generated for · since D42 instances that write the same values differently share a module*
 
 - **Decision:** a hierarchical instance whose overrides change a parameter of its component gets a module of its
   own, generated with those values throughout its design: `<module>_1`, `<module>_2`, ... in the order they turn
@@ -564,7 +564,7 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** XactFlow validates names and expressions itself.
 
 ## D35. A port goes straight to a module port only when both number their bits alike
-*2026-11-10 · active · narrows D4*
+*2026-11-10 · active · narrows D4 · since D42 both also have to be of one type, where a part goes by a member's name*
 
 - **Decision:** a whole port wired to one of the module's own ports connects directly, with no net in between,
   when the two have the same bounds, or when no connection takes a part of either. Otherwise the instance's port
@@ -579,7 +579,7 @@ rounds are an adversarial AI agent attacking it.
   something the design does not.
 
 ## D36. A generated module declares its component's module parameters, each for one value
-*2026-11-10 · active · changes D26's "the module takes no parameters"*
+*2026-11-10 · active · changes D26's "the module takes no parameters" · D41 takes the type off the declaration*
 
 - **Decision:** when the view that holds a design also names a component instantiation, its module parameters
   become parameters of the generated module. Each is declared with its `dataType`, if it has one, and with the
@@ -673,3 +673,50 @@ rounds are an adversarial AI agent attacking it.
 - **Considered:** something no tool compiles, such as an instance of a module that does not exist, which
   Verilator looks up even in a branch that is not taken, so every build would fail.
 - **Revisit if:** a tool objects to an `initial` inside a generate block that is not taken.
+
+## D41. A generated module's parameters have no type, unless it is a package's typedef
+*2026-11-10 · active · changes D36's "declared with its `dataType`" · from the ninth round*
+
+- **Decision:** a generated module declares a parameter with no type, `parameter W = 16`, whatever `dataType`
+  its component gives it. The parameter then takes the type of what an instance gives it, and the check
+  compares that with the value as it is written, with nothing converted between the two. One kind of type is
+  kept: a typedef named with its package, `pkg::mode_t`, as only the compiler knows such a type's values. The
+  check then casts the value to it, `P !== pkg::mode_t'(pkg::FAST)`, as the declaration does.
+- **Why:** with the type written, the declaration converted the value, and the check compared the converted
+  parameter with the value as written. The module then refused the value it is generated for, in all three
+  tools. `xactflow-sv` writes `int` for a parameter the HDL gives no type, so `parameter TARGET = "XILINX"` came
+  out as an `int`, four characters of it; `parameter logic [15:0] OFFSET = -2` is 65534 against -2. A real, a
+  value wider than 32 bits and Verilog-2001's `parameter [7:0]` went the same way or were refused. Everything in
+  the module is worked out from the value as the component has it (D11), not as a type would hold it, so that
+  is the value to compare with.
+- **The cost:** an instance written by hand that gives a value the HDL's type would have made the same,
+  `16'hFFFE` for that -2, is refused. And Verilator 5.022 has an internal fault on a parameter with no type whose
+  value is an enum constant of a package, in code written by hand as well; such a parameter needs its type in
+  the component.
+- **Considered:** keeping the type and comparing with a `localparam` of the same type, which lets through a
+  value the type cuts short, and lints with a warning wherever the importer's `int` is wrong; leaving out only
+  `int`.
+- **Revisit if:** `xactflow-sv` stops writing `int` for a parameter with no type, which is worth raising, or the
+  evaluator starts to apply a `dataType`.
+
+## D42. The ninth round of `rtl-breaker`: what it found, and the rounds rest again
+*2026-11-10 · active · under D22*
+
+- **What it attacked:** D25 to D40, which no round had seen: about 1700 random designs, of hierarchies with
+  parameters and of wiring against module ports with other bounds, and cases written by hand.
+- **Found and fixed:**
+  - Silent wrong RTL, from XML written by hand only: a struct wired whole to a module port of another struct
+    type of the same size, with a member of it read elsewhere, read that member of the module port's type. A
+    port that has parts taken now connects directly only when the two are of one type as well (D35).
+  - A generated module refused its own values (D41).
+  - A value written over two lines broke the comment that names a version's values, and the string of a
+    compiler's check. Both are put on one line.
+  - Instances that give a hierarchical component the same values written differently, `16` and `8+8`, or one
+    spelling out a default, were refused as two files of one name. They share the module, which is generated
+    with the values as the first of them wrote them (D26).
+  - `tiedValue="open"` on a part of a port left the whole port open, the bits nobody mentioned with it. It is
+    refused: only a whole port can be left open.
+  - A `filelist` that names a folder raised `IsADirectoryError`. It is refused like any file in the way.
+- **Under D22** another round is due after silent wrong RTL that a real flow could hit. The one silent case
+  takes two struct types of one size with their members listed, which no importer writes, so the rounds rest.
+  What held up is in the round's report, kept with its reproducers outside this repository.

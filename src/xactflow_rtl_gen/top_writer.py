@@ -60,10 +60,8 @@ _TYPE = re.compile(
 _NAMED_TYPE = re.compile(r"[A-Za-z_][\w$]*(?:::[A-Za-z_][\w$]*)*(?:\s+(?:un)?signed)?")  # a typedef, or int unsigned
 _BIT_VECTOR = re.compile(r"(?:logic|bit|reg)(?:\s+unsigned)?\s*(?:\[[^\[\]]*\]\s*)*")
 _DIMENSION = re.compile(r"\[([^\[\]]*)\]")
-# The type of a module parameter: a vector with its dimensions, or one of these, or a typedef named with its package.
-_VECTOR_TYPE = re.compile(r"(?P<base>(?:logic|bit|reg)(?:\s+(?:un)?signed)?)\s*(?P<dimensions>(?:\[[^\[\]]*\]\s*)+)")
-_NOT_INTEGRAL = {"real", "shortreal", "realtime", "string"}
-_PARAMETER_TYPES = {"logic", "bit", "reg", *_SIZED_TYPES, *_NOT_INTEGRAL}
+_NOT_INTEGRAL = {"real", "shortreal", "realtime", "string"}  # the types of a parameter that `!==` does not compare
+_PACKAGE_TYPE = re.compile(r"[A-Za-z_][\w$]*(?:::[A-Za-z_][\w$]*)+")  # a typedef named with its package
 
 _IN = ipxact.Direction.IN
 _OUT = ipxact.Direction.OUT
@@ -197,9 +195,14 @@ def _bits_needed(value: int) -> int:
     return max(1, value.bit_length()) if value >= 0 else (~value).bit_length() + 1
 
 
+def _one_line(text: object) -> str:
+    """Text for a comment or a message, which end where their line does: a value may be written over several."""
+    return " ".join(str(text).split())
+
+
 def _sv_string(text: str) -> str:
     """A string literal for a message: $error reads it as a format, so a percent sign is doubled."""
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+    return '"' + _one_line(text).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
 def _compiler_check(condition: str, label: str, message: str) -> List[str]:
@@ -586,7 +589,7 @@ class _Held:
 class _Declared:
     """A parameter of the module being written, with the one value the module is generated for (D36)."""
 
-    type_name: str  # as SystemVerilog, or nothing for a parameter that takes its type from its value
+    type_name: str  # a typedef named with its package, or nothing: the parameter then takes its value's type
     name: str
     value: str
     differs: str  # the operator that tells another value from this one
@@ -924,31 +927,12 @@ def _type_in_this_instance(
     return base, [*own, *bounds]
 
 
-def _parameter_type(parameter: ipxact.ModuleParameter, resolve: _Resolver, where: str) -> str:
-    """The type the generated module declares one of its parameters with: the `dataType` an importer copied
-    from the HDL, with the bounds of a vector worked out. With none the parameter takes its type from its
-    value, which is written at the width and sign its IP-XACT type gives it (D11)."""
-    data_type = " ".join((parameter.data_type or "").split())
-    if not data_type:
-        return ""
-    if data_type == "type":
-        raise ValueError(f"{where}: a type parameter on a generated module is not supported yet")
-    vector = _VECTOR_TYPE.fullmatch(data_type)
-    if vector is not None:
-        bounds = _bounds_in(vector.group("dimensions"), resolve, where)
-        return vector.group("base") + " " + "".join(f"[{left}:{right}]" for left, right in bounds)
-    if not _NAMED_TYPE.fullmatch(data_type):
-        raise ValueError(f"{where}: {data_type!r} is not a type this version can declare")
-    if data_type.split()[0] not in _PARAMETER_TYPES and "::" not in data_type:
-        raise ValueError(f"{where}: the generated module cannot see type {data_type}, which needs its package in its name")
-    return data_type
-
-
-def _differs(type_name: str, value: str) -> str:
+def _differs(data_type: str, value: str) -> str:
     """The operator that tells another value from this one. `!==` tells x and z apart too, where `!=` would
-    not know and so let any value through, but it takes no real number and no string."""
+    not know and so let any value through, but it takes no real number and no string: not a value that is
+    one, and not what an instance gives a parameter whose HDL type is one."""
     kinds = {token.lastgroup for token in _TOKEN.finditer(value)}
-    if (type_name.split() or [""])[0] in _NOT_INTEGRAL or kinds & {"string", "real"}:
+    if (data_type.split() or [""])[0] in _NOT_INTEGRAL or kinds & {"string", "real"}:
         return "!="
     return "!=="
 
@@ -1101,6 +1085,16 @@ def _check_type_is_visible(port: _Port) -> None:
         raise ValueError(f"{port.label}: the generated module cannot see type {type_name}, which needs its package in its name")
 
 
+def _parts_alike(first: _Port, second: _Port) -> bool:
+    """Whether a part of one port is the same part of the other: by number where both are plain bits, and
+    by a member's name only where both are of one type, as two structs can have a member `a` in other bits."""
+    if first.vectors != second.vectors:
+        return False
+    if first.width is not None and second.width is not None:
+        return True
+    return _plain_type(first.declaration) == _plain_type(second.declaration)
+
+
 def _plain_type(declaration: str) -> str:
     """A declaration for comparing: spacing doesn't matter, and an array of one is the same bits."""
     return re.sub(r"\s+", "", declaration).replace("[0:0]", "")
@@ -1167,7 +1161,7 @@ class _ModuleBuilder:
         top_overrides: Optional[Dict[str, str]] = None,
         design_values: Optional[Dict[str, object]] = None,
         module_name: Optional[str] = None,
-        variants: Optional[Dict[Tuple[object, ...], str]] = None,
+        variants: Optional[Dict[Tuple[object, ...], Tuple[str, Dict[str, str]]]] = None,
         configuration_values: Optional[Dict[str, object]] = None,
         leave_open: bool = False,
     ) -> None:
@@ -1302,7 +1296,11 @@ class _ModuleBuilder:
         """The module parameters of the component this module is generated from become the module's own, each
         with the one value the module is generated for, so that what instantiates it by hand still compiles.
         Everything inside is worked out for those values, so the compiler is given a check that refuses any
-        other (D36)."""
+        other (D36). A parameter is declared with no type, so it takes the type of what it is given, and the
+        check compares that with the value as it is written here, nothing converted in between: with the
+        component's `dataType` the declaration would convert the value, and the module refuse its own. Only a
+        typedef named with its package is kept, as only the compiler knows what its values are, and the check
+        then casts the value to it as the declaration does (D41)."""
         instantiation = self.top_instantiation
         if instantiation is None:
             return
@@ -1312,12 +1310,15 @@ class _ModuleBuilder:
         )
         for name, value in values:
             label = f"{where}: module parameter {name}"
-            type_name = _parameter_type(by_name[name], self.top_resolve, label)
+            data_type = " ".join((by_name[name].data_type or "").split())
+            if data_type == "type":
+                raise ValueError(f"{label}: a type parameter on a generated module is not supported yet")
             if "'{" in value:
                 raise ValueError(f"{label}: the value {value!r} cannot be compared with another, so the module cannot check it is given this one")
             if any(name == other.name for other in self.declared):
                 raise ValueError(f"{label}: the component has two module parameters of that name")
-            self.declared.append(_Declared(type_name, name, value, _differs(type_name, value)))
+            type_name = data_type if _PACKAGE_TYPE.fullmatch(data_type) else ""
+            self.declared.append(_Declared(type_name, name, value, _differs(data_type, value)))
 
     def _add_instance(self, linked_instance) -> None:
         name = linked_instance.instance_name
@@ -1350,11 +1351,11 @@ class _ModuleBuilder:
             if "ADDR_RULES" in given:
                 # Its module is generated for one value of each parameter (D36), and would refuse the table.
                 raise ValueError(f"{where}: its module is generated here, so it cannot be given the address map's rule table as a parameter")
-            version = self._module_for_values(component, view, module, overrides, where)
+            version, values = self._module_for_values(component, view, module, overrides, where)
             if version == module:  # values that change nothing: the module as it is
                 self.children.append(_Child(component, design.design, design.configuration, view))
             else:
-                self.children.append(_Child(component, design.design, design.configuration, view, overrides, version))
+                self.children.append(_Child(component, design.design, design.configuration, view, values, version))
                 module = version
 
         ports: Dict[str, _Port] = {}
@@ -1387,13 +1388,17 @@ class _ModuleBuilder:
 
     def _module_for_values(
         self, component: ipxact.Component, view: Optional[ipxact.View], base: str, overrides: Dict[str, str], where: str
-    ) -> str:
-        """The module a hierarchical instance needs (D26). Every value in a generated module is worked out, and
-        a parameter it declares only takes the value it is generated for (D36), so a set of values that changes
-        any parameter gets a module of its own: `<module>_1`, `<module>_2`, ... in the order they turn up. Values
-        that change nothing keep the module."""
+    ) -> Tuple[str, Dict[str, str]]:
+        """The module a hierarchical instance needs (D26), and the values to generate it with. Every value in a
+        generated module is worked out, and a parameter it declares only takes the value it is generated for
+        (D36), so a set of values that changes any parameter gets a module of its own: `<module>_1`,
+        `<module>_2`, ... in the order they turn up. Values that change nothing keep the module.
+
+        Instances whose values come to the same share a module, however each wrote them: `16`, `8+8`, or with
+        a default spelled out. The module is generated with the values of the first one to turn up, so that
+        it is one text."""
         if not overrides:
-            return base
+            return base, {}
         instantiation = _component_instantiation(component, view, where)
         parameters = [*component.parameters, *(instantiation.parameters if instantiation else []), *(instantiation.module_parameters if instantiation else [])]
         _check_overrides_name_parameters(overrides, parameters, where, f"{component.vlnv}")
@@ -1408,14 +1413,14 @@ class _ModuleBuilder:
 
         values = tuple((p.name, value(p, after)) for p in parameters)
         if values == tuple((p.name, value(p, before)) for p in parameters):
-            return base
+            return base, {}
         key = (str(component.vlnv), view.name if view is not None else None, values)
         if key not in self.variants:
-            taken = set(self.variants.values())
+            taken = {name for name, _ in self.variants.values()}
             number = 1
             while f"{base}_{number}" in taken:
                 number += 1
-            self.variants[key] = f"{base}_{number}"
+            self.variants[key] = (f"{base}_{number}", dict(overrides))
         return self.variants[key]
 
     def _configured_view(self, linked_instance) -> Tuple[Optional[ipxact.View], Optional[ipxact.ViewConfiguration]]:
@@ -1957,6 +1962,9 @@ class _ModuleBuilder:
         for terminal in terminals:
             port = terminal.port
             if text == "open":
+                if terminal.select:
+                    # Leaving the port open would leave its other bits open as well, without a word.
+                    raise ValueError(f"{where}: only a whole port can be left open, not {port.label}{terminal.select}")
                 port.left_open = True
                 continue
             if port.direction is _OUT:
@@ -2060,9 +2068,9 @@ class _ModuleBuilder:
 
     def _connect_top_ports_directly(self) -> None:
         """A whole port wired to one of the module's own ports needs no net in between. The instance's port
-        then goes by the module port's name, so a part of it taken elsewhere, `[3:0]`, has to mean the same
-        bits of both: a port that has parts taken only connects directly when the two number their bits alike
-        (D35)."""
+        then goes by the module port's name, so a part of it taken elsewhere, `[3:0]` or `.addr`, has to mean
+        the same bits of both: a port that has parts taken only connects directly when the two number their
+        bits alike, and are of one type where a part goes by a member's name (D35)."""
         in_parts = set()  # the ports some connection takes a part of
         for block in self.blocks:
             for assign in block.assigns:
@@ -2074,7 +2082,7 @@ class _ModuleBuilder:
             for assign in block.assigns:
                 sink, source = assign.sink, assign.source
                 whole = isinstance(source, _Terminal) and not (source.invert or source.select or sink.select)
-                whole = whole and (sink.port.vectors == source.port.vectors or not {id(sink.port), id(source.port)} & in_parts)
+                whole = whole and (_parts_alike(sink.port, source.port) or not {id(sink.port), id(source.port)} & in_parts)
                 if whole and self._is_module_port(source.port) and not self._is_module_port(sink.port) and sink.port.net is None and source.port.direction is _OUT:
                     sink.port.net = source.port.net
                 elif whole and self._is_module_port(sink.port) and not self._is_module_port(source.port) and source.port.net is None and sink.port.direction is _IN:
@@ -2197,7 +2205,7 @@ class _ModuleBuilder:
         lines = [self.header]
         if self.module_name and self.top_component is not None and self.top_overrides:
             names = {p.parameter_id: p.name for p in self.top_parameters}
-            given = ", ".join(f"{names[key]} = {value}" for key, value in self.top_overrides.items())
+            given = ", ".join(f"{names[key]} = {_one_line(value)}" for key, value in self.top_overrides.items())
             lines.append(f"// The version of {self.top_component.vlnv} with {given}.")
         lines.append("")
         lines.extend(self._render_header())
@@ -2211,7 +2219,7 @@ class _ModuleBuilder:
             lines.append("")
         for block in self.blocks:
             if block.assigns or len(block.comment) > 1 or " <-> " in block.comment[0]:
-                lines.extend(f"    // {comment}" for comment in block.comment)
+                lines.extend(f"    // {_one_line(comment)}" for comment in block.comment)
                 lines.extend(self._render_assigns(block, labels))
                 lines.append("")
         for instance in self.instances.values():
@@ -2240,6 +2248,8 @@ class _ModuleBuilder:
         lines = ["    // Every width and value below is worked out for these values of the parameters. For others,", "    // generate the module again."]
         for parameter in self.declared:
             value = parameter.value if _single_token(parameter.value) else f"({parameter.value})"
+            if parameter.type_name:  # what the declaration makes of the value, on this side too
+                value = f"{parameter.type_name}'({parameter.value})"
             message = f"{self.module} is generated for {parameter.name} = {parameter.value}, and was given another value"
             label = self._check_label(parameter.name + "_as_generated", labels)
             lines.extend(_compiler_check(f"{parameter.name} {parameter.differs} {value}", label, message))
@@ -2266,7 +2276,7 @@ class _ModuleBuilder:
                 source = assign.source
             if assign.cast:
                 source = f"{assign.cast}'({source})"
-            comment = f"  // {assign.note}" if assign.note else ""
+            comment = f"  // {_one_line(assign.note)}" if assign.note else ""
             rows.append(f"    assign {side(assign.sink):<{width}} = {source};{comment}")
         for assign in block.assigns:
             if assign.needs is not None:
@@ -2286,7 +2296,7 @@ class _ModuleBuilder:
         if instance.description:
             lines.extend(f"    // {line.strip()}" for line in str(instance.description).splitlines() if line.strip())
         if instance.transforms:
-            lines.append(f"    // Transforms recorded but not applied here: {', '.join(instance.transforms)}")
+            lines.append(f"    // Transforms recorded but not applied here: {_one_line(', '.join(instance.transforms))}")
         if instance.parameters:
             lines.append(f"    {instance.module} #(")
             lines.append(",\n".join(f"        .{name}({value})" for name, value in instance.parameters))
@@ -2319,7 +2329,7 @@ def _generate(
     top_view: Optional[ipxact.View] = None,
     top_overrides: Optional[Dict[str, str]] = None,
     module_name: Optional[str] = None,
-    variants: Optional[Dict[Tuple[object, ...], str]] = None,
+    variants: Optional[Dict[Tuple[object, ...], Tuple[str, Dict[str, str]]]] = None,
     leave_open: bool = False,
 ) -> None:
     _check_linked(linked)

@@ -1975,6 +1975,51 @@ def test_a_percent_sign_in_a_name_is_doubled_in_the_compilers_message():
     assert "ad hoc connection 'at_50%%'" in files_of(soc, documents)["soc.sv"]
 
 
+# --- found by rtl-breaker's ninth round, 2026-11-10
+
+
+TWO_PAIRS = """
+package p_pkg;
+    typedef struct packed { logic [3:0] a; logic [3:0] b; } t;  // a is the high nibble
+    typedef struct packed { logic [3:0] b; logic [3:0] a; } u;  // and here the low one
+endpackage
+"""
+
+
+@pytest.mark.parametrize("module_port_type", ["p_pkg::t", "p_pkg::u"])
+def test_a_member_of_a_struct_wired_whole_to_a_module_port_of_another_type(tmp_path, module_port_type):
+    """D35. The instance's port went by the module port's name, so `m.o.a` was read as the member `a` of the
+    module port's type: the other nibble, without a word."""
+    members = dict(a=4, b=4) if module_port_type.endswith("::t") else dict(b=4, a=4)
+    documents = [
+        component("m", [struct("o", "out", "p_pkg::t", a=4, b=4)]),
+        component("s", [wire("x", "in", 4), wire("seen", "out", 4)]),
+        hierarchical("chip", "chip_d", [struct("o", "out", module_port_type, **members), wire("seen", "out", 4)]),
+    ]
+    member = ipxact.InternalPortReference(component_instance_ref="m", port_ref="o", sub_port_refs=[ipxact.SubPortReference(sub_port_ref="a")])
+    chip_d = design(
+        "chip_d",
+        [instance("m"), instance("s")],
+        ad_hocs=[
+            ad_hoc("whole", ("m", "o"), external=["o"]),
+            ipxact.AdHocConnection(name="member", internal_port_references=[member, ipxact.InternalPortReference(component_instance_ref="s", port_ref="x")]),
+            ad_hoc("seen", ("s", "seen"), external=["seen"]),
+        ],
+    )
+    source = "module m (output p_pkg::t o); assign o = 8'hA5; endmodule\nmodule s (input logic [3:0] x, output logic [3:0] seen); assign seen = x; endmodule\n"
+    files = files_of(chip_d, documents)
+    direct = module_port_type == "p_pkg::t"
+    assert ("assign s_x = o.a;" in files["chip.sv"]) == direct and ("assign s_x = m_o.a;" in files["chip.sv"]) != direct
+    if has_icarus:
+        assert "PASS" in simulate(tmp_path, {"p_pkg.sv": TWO_PAIRS, **files}, [source], bench("chip", {}, {"o": (8, 0xA5), "seen": (4, 0xA)}))
+
+
+def test_a_part_of_a_port_cannot_be_left_open():
+    """`.port ()` leaves every bit open, so `open` on a part left the bits nobody mentioned open as well."""
+    soc = design("soc", [instance("s", "seer")], ad_hocs=[ad_hoc("p", ("s", "data_i", (3, 0)), tied="open")])
+    refused(r"only a whole port can be left open, not s\.data_i\[3:0\]", soc, [plain_seer()])
+
+
 # --- D33: a component with no view takes its only component instantiation
 
 

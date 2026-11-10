@@ -3,7 +3,7 @@
 A hierarchical component can describe a module with parameters, as `xactflow-sv` imports one: each a parameter
 of the component, and a module parameter that names it. The generated module declares them, so that what
 instantiates it by hand still compiles, with the one value it is generated for, and has the compiler refuse
-any other.
+any other. They are declared with no type (D41).
 """
 
 import subprocess
@@ -107,7 +107,7 @@ def test_the_module_declares_its_parameters_with_the_values_it_is_generated_for(
     chip, chip_d = holder("chip", {"W": 16})
     files = passes(tmp_path, chip_d, [chip, sized()], SIZED, module="chip", expect={"o": (16, 0xFFFF)})
     text = files["chip.sv"]
-    assert "module chip #(\n    parameter int unsigned W = 16\n) (\n    output logic [15:0] o\n);" in text
+    assert "module chip #(\n    parameter W = 16\n) (\n    output logic [15:0] o\n);" in text
     assert "    if (W !== 16) begin : W_as_generated\n" in text
     assert '$error("chip is generated for W = 16, and was given another value");' in text
     assert ".WIDTH(16)" in text.replace(" ", "")
@@ -170,7 +170,7 @@ def test_a_hierarchical_instance_is_given_the_values_its_module_is_generated_for
     assert sorted(files) == ["soc.sv", "wrap.sv", "wrap_1.sv"]
     top = files["soc.sv"].replace(" ", "")
     assert "wrap_1#(\n.W(16)\n)a(" in top and "wrap#(\n.W(8)\n)b(" in top
-    assert "parameter int unsigned W = 16" in files["wrap_1.sv"] and "parameter int unsigned W = 8" in files["wrap.sv"]
+    assert "    parameter W = 16\n" in files["wrap_1.sv"] and "    parameter W = 8\n" in files["wrap.sv"]
     assert "if (W !== 16) begin : W_as_generated" in files["wrap_1.sv"]
 
 
@@ -189,7 +189,7 @@ def test_a_parameter_the_hdl_would_derive_is_declared_with_its_value(tmp_path):
     """On an instance of an IP such a parameter is left to the HDL (D19). The generated module is the HDL."""
     chip, chip_d = holder("chip", {"W": 16, "HALF": "W / 2"})
     files = passes(tmp_path, chip_d, [chip, sized()], SIZED, module="chip", expect={"o": (16, 0xFFFF)})
-    assert "parameter int unsigned W = 16,\n    parameter int unsigned HALF = 8\n" in files["chip.sv"]
+    assert "parameter W = 16,\n    parameter HALF = 8\n" in files["chip.sv"]
     outer = design("soc", [instance("c", "chip")])
     files = passes(tmp_path, outer, [chip, chip_d, sized()], SIZED, expect={"c_o": (16, 0xFFFF)})
     assert "chip#(\n.W(16)\n)c(" in files["soc.sv"].replace(" ", "")
@@ -199,23 +199,49 @@ def test_a_parameter_the_hdl_would_derive_is_declared_with_its_value(tmp_path):
     "data_type, value, declared, check",
     [
         (None, "8'hA5", "parameter P = 8'hA5", "P !== 8'hA5"),
-        ("logic [W-1:0]", "'1", "parameter logic [15:0] P = '1", "P !== '1"),
-        ("bit   signed [3:0]", "-4'sd2", "parameter bit signed [3:0] P = -4'sd2", "P !== (-4'sd2)"),
-        ("string", '"fast"', 'parameter string P = "fast"', 'P != "fast"'),
-        ("real", "1.5", "parameter real P = 1.5", "P != 1.5"),
+        ("int unsigned", "W * 2", "parameter P = 32", "P !== 32"),
+        ("logic [W-1:0]", "'1", "parameter P = '1", "P !== '1"),
+        ("bit   signed [3:0]", "-4'sd2", "parameter P = -4'sd2", "P !== (-4'sd2)"),
+        ("string", '"fast"', 'parameter P = "fast"', 'P != "fast"'),
+        ("real", "1.5", "parameter P = 1.5", "P != 1.5"),
+        ("real", "2", "parameter P = 2", "P != 2"),
         (None, "2.5e3", "parameter P = 2.5e3", "P != 2.5e3"),
-        ("ip_types_pkg::mode_t", "ip_types_pkg::FAST", "parameter ip_types_pkg::mode_t P = ip_types_pkg::FAST", "P !== ip_types_pkg::FAST"),
-        ("int", "W * 2", "parameter int P = 32", "P !== 32"),
+        # Only a typedef named with its package is kept: the check casts the value to it, as the declaration does.
+        ("ip_types_pkg::mode_t", "ip_types_pkg::FAST", "parameter ip_types_pkg::mode_t P = ip_types_pkg::FAST", "P !== ip_types_pkg::mode_t'(ip_types_pkg::FAST)"),
+        ("ip_types_pkg::word_t", "16'hFFFE", "parameter ip_types_pkg::word_t P = 16'hFFFE", "P !== ip_types_pkg::word_t'(16'hFFFE)"),
+        ("ip_types_pkg::pair_t", "ip_types_pkg::PAIR", "parameter ip_types_pkg::pair_t P = ip_types_pkg::PAIR", "P !== ip_types_pkg::pair_t'(ip_types_pkg::PAIR)"),
+        # A type the module could not see, or that is no type at all, is not written, so it does no harm.
+        ("mode_t", "1", "parameter P = 1", "P !== 1"),
+        ("int = 2, parameter Q", "1", "parameter P = 1", "P !== 1"),
+        # Round 9: with its type written, each of these was converted by the declaration, and the module
+        # refused its own value. `int` is what the importer writes for a parameter with no type.
+        ("int", '"XILINX"', 'parameter P = "XILINX"', 'P != "XILINX"'),
+        ("int", "2.5", "parameter P = 2.5", "P != 2.5"),
+        ("int", "64'hFFFF_FFFF_0000_0001", "parameter P = 64'hFFFF_FFFF_0000_0001", "P !== 64'hFFFF_FFFF_0000_0001"),
+        ("int", "5000000000", "parameter P = 34'sd5000000000", "P !== 34'sd5000000000"),
+        ("int", "'x", "parameter P = 'x", "P !== 'x"),
+        ("logic [15:0]", "-2", "parameter P = -2", "P !== (-2)"),
+        ("bit [7:0]", "-1", "parameter P = -1", "P !== (-1)"),
+        ("logic [15:0]", "8'shFF", "parameter P = 8'shFF", "P !== 8'shFF"),
+        # Verilog-2001's parameters with a range and no type, as the importer writes them.
+        ("[7:0]", "8'hF0", "parameter P = 8'hF0", "P !== 8'hF0"),
+        ("signed[7:0]", "-8'sd3", "parameter P = -8'sd3", "P !== (-8'sd3)"),
     ],
 )
 def test_each_kind_of_parameter_is_declared_and_checked(tmp_path, data_type, value, declared, check):
+    """The module compiles in the three tools and simulates with its own values, and so does a design the
+    exporter generates around it, which gives it those values on the instance."""
     chip, chip_d = holder("chip", {"W": 16})
     chip.model.component_instantiations[0].module_parameters.append(ipxact.ModuleParameter(name="P", value=_E(value), data_type=data_type))
-    packages = "package ip_types_pkg; typedef enum logic [1:0] {SLOW, FAST} mode_t; endpackage\n"
-    simulation = "string" not in declared and "real" not in declared
-    files = passes(tmp_path, chip_d, [chip, sized()], SIZED, module="chip", expect={"o": (16, 0xFFFF)}, packages=packages, simulation=simulation)
-    assert f"    {declared}\n" in files["chip.sv"]
+    packages = (
+        "package ip_types_pkg;\n    typedef enum logic [1:0] {SLOW, FAST} mode_t;\n    typedef logic [15:0] word_t;\n"
+        "    typedef struct packed { logic [3:0] a; logic [3:0] b; } pair_t;\n    localparam pair_t PAIR = 8'hA5;\nendpackage\n"
+    )
+    files = passes(tmp_path, chip_d, [chip, sized()], SIZED, module="chip", expect={"o": (16, 0xFFFF)}, packages=packages)
+    assert f"    {declared}\n" in files["chip.sv"] and "parameter Q" not in files["chip.sv"]
     assert f"    if ({check}) begin : P_as_generated\n" in files["chip.sv"]
+    around = design("soc", [instance("c", "chip")])
+    passes(tmp_path, around, [chip, chip_d, sized()], SIZED, expect={"c_o": (16, 0xFFFF)}, packages=packages)
 
 
 def test_a_runtime_parameter_is_not_declared():
@@ -236,8 +262,6 @@ def test_the_checks_label_gives_way_to_a_name_in_the_module(tmp_path):
     "module_parameter, message",
     [
         (ipxact.ModuleParameter(name="T", value=_E("logic"), data_type="type"), "module parameter T: a type parameter on a generated module is not supported yet"),
-        (ipxact.ModuleParameter(name="P", value=_E("1"), data_type="mode_t"), "module parameter P: the generated module cannot see type mode_t"),
-        (ipxact.ModuleParameter(name="P", value=_E("1"), data_type="int = 2, parameter Q"), "is not a type this version can declare"),
         (ipxact.ModuleParameter(name="P", value=_E("'{1, 2}"), data_type="ip_types_pkg::pair_t"), "cannot be compared with another"),
         (ipxact.ModuleParameter(name="o", value=_E("1")), "a port and a module parameter both called 'o'"),
         (ipxact.ModuleParameter(name="m", value=_E("1")), "instance 'm' has the name of a parameter of module chip"),
@@ -261,6 +285,35 @@ def test_a_net_gives_way_to_a_parameter_of_the_module(tmp_path):
     source = SIZED + "module seer16 (input logic [15:0] data_i, output logic [15:0] seen_o); assign seen_o = data_i; endmodule\n"
     files = passes(tmp_path, chip_d, [chip, sized(), seer16], source, module="chip", expect={"o": (16, 0xFFFF)})
     assert "m_data_o_net;" in files["chip.sv"]
+
+
+def test_a_value_written_over_two_lines_stays_in_its_comment_and_its_message(tmp_path):
+    """Round 9. A comment and a string end where their line does, and an expression in XML need not."""
+    chip, chip_d = holder("chip", {"W": "8 +\n 8"})
+    files = passes(tmp_path, chip_d, [chip, sized()], SIZED, module="chip", expect={"o": (16, 0xFFFF)})
+    assert '$error("chip is generated for W = 8 + 8, and was given another value");' in files["chip.sv"]
+    wrap, wrap_d = holder("wrap", {"W": 8})
+    soc = design("soc", [instance("a", "wrap", W="8 +\n 8")])
+    files = passes(tmp_path, soc, [wrap, wrap_d, sized()], SIZED, expect={"a_o": (16, 0xFFFF)})
+    assert "// The version of test.org:ip:wrap:1.0 with W = 8 + 8.\n" in files["wrap_1.sv"]
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ({"W": 16}, {"W": 16, "D": 2}),  # one also states a default
+        ({"W": 16, "D": 3}, {"D": 3, "W": 16}),  # in another order
+        ({"W": 16}, {"W": "8+8"}),  # written another way
+        ({"W": 16}, {"W": "DP"}),  # through a parameter of the design
+    ],
+)
+def test_instances_with_the_same_values_share_a_module_however_they_wrote_them(tmp_path, first, second):
+    """Round 9: the module's second line named the values as each instance wrote them, so two instances that
+    gave the same ones another way were refused as two different files of one name."""
+    wrap, wrap_d = holder("wrap", {"W": 8, "D": 2})
+    soc = design("soc", [instance("a", "wrap", **first), instance("b", "wrap", **second)], parameters=[parameter("DP", "8 + 8")])
+    files = passes(tmp_path, soc, [wrap, wrap_d, sized()], SIZED, expect={"a_o": (16, 0xFFFF), "b_o": (16, 0xFFFF)})
+    assert sorted(files) == ["soc.sv", "wrap_1.sv"]
 
 
 # --- D37: the values a component's reference to its design configuration gives that one's parameters

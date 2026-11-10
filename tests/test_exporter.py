@@ -426,6 +426,18 @@ def test_a_file_list_that_is_no_plain_name_or_takes_a_modules_file_is_refused(so
     assert not (tmp_path / "soc.sv").exists()  # refused before anything was written
 
 
+def test_a_folder_in_the_way_of_a_file_is_refused(soc, library, tmp_path):
+    for name in (".", ".."):
+        with pytest.raises(TypeError, match="the filelist option is a file name in the output folder"):
+            RtlExporter().export(link(soc, library), tmp_path, filelist=name)
+    (tmp_path / "lists").mkdir()
+    with pytest.raises(FileExistsError, match="lists already exists and is a folder"):
+        RtlExporter().export(link(soc, library), tmp_path, filelist="lists")
+    (tmp_path / "out" / "soc.sv").mkdir(parents=True)
+    with pytest.raises(FileExistsError, match="soc.sv already exists and is a folder"):
+        RtlExporter().export(link(soc, library), tmp_path / "out")
+
+
 def test_unconnected_option_reaches_the_generation(soc, library, tmp_path):
     RtlExporter().export(link(soc, library), tmp_path, unconnected="open")
     with pytest.raises(TypeError, match="the unconnected option is one of refuse, open, got 'maybe'"):

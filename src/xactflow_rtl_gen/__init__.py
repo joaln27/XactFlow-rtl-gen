@@ -49,7 +49,9 @@ class RtlExporter(Exporter):
         filelist = options.pop("filelist", None)
         if options:
             raise TypeError(f"xactflow-rtl-gen got unknown options: {', '.join(sorted(options))}")
-        if filelist is not None and (not isinstance(filelist, str) or not filelist.strip() or Path(filelist).name != filelist):
+        if filelist is not None and (
+            not isinstance(filelist, str) or not filelist.strip() or Path(filelist).name != filelist or filelist in (".", "..")
+        ):
             raise TypeError(f"xactflow-rtl-gen: the filelist option is a file name in the output folder, got {filelist!r}")
 
         files = generate_files(self._linked(subject, lib), common, top, unconnected)
@@ -88,6 +90,8 @@ def _check_overwrite(path: Path) -> None:
     """Regenerating our own output is fine. Never replace a file a person may have written."""
     if not path.exists():
         return
+    if path.is_dir():
+        raise FileExistsError(f"{path} already exists and is a folder")
     with path.open(encoding="utf-8", errors="replace") as file:
         first_line = file.readline()
     if not first_line.startswith((GENERATED_MARKER, _FORMER_MARKER)):

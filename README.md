@@ -95,7 +95,7 @@ That one shape covers part selects, inverted port maps, tie-offs and struct sub-
 net of their own: a logical port mapped in slices, called `<connection>_<logical port>`, and an inout,
 which has to share a net with what it connects to. A whole port wired to one of the module's own ports
 connects directly, with no net in between, unless a part of it is taken elsewhere and the two number their
-bits differently (D35). A net's name gets `_net` added if it would be a keyword, or already belongs to an
+bits differently, or are structs of different types (D35). A net's name gets `_net` added if it would be a keyword, or already belongs to an
 instance or a port.
 
 ## Where the module's ports come from
@@ -109,11 +109,13 @@ they are, for a design that means them to be. An instance's output nothing reads
 
 If that view also names a component instantiation with module parameters, the module declares them, so
 that code which instantiates it with `#(...)` still compiles. They do not configure it: each has the one
-value the module is generated for, and the module has the compiler refuse any other (D36):
+value the module is generated for, and the module has the compiler refuse any other (D36). A parameter is
+declared with no type, so that nothing converts what it is given before it is compared; only a typedef named
+with its package is kept (D41):
 
 ```systemverilog
 module croc_soc #(
-    parameter int unsigned GpioCount = 32
+    parameter GpioCount = 32
 ) (
     ...
 );
@@ -142,8 +144,8 @@ the component can say which ports those are.
   holds, at any depth.
 - **A hierarchical instance:** its view holds a design, which gets its own module. Every value in a generated
   module is worked out, so an instance whose overrides change a parameter of its component gets a module of
-  its own, `<module>_1`, `<module>_2`, ..., one for each set of values, with those values all the way down its
-  design (D26). Its first line says which values it is for. If the module declares parameters (D36), the
+  its own, `<module>_1`, `<module>_2`, ..., one for each set of values, however each instance writes them, with
+  those values all the way down its design (D26). Its first line says which values it is for. If the module declares parameters (D36), the
   instance is given the values it is generated for.
 - **A design's parameters:** a component's reference to the design it holds can give them values, worked out
   in the component, so a top component or a hierarchical instance sets its design's parameters this way. That
@@ -186,7 +188,7 @@ the component can say which ports those are.
 - **A port's own `defaultValue`:** applies only through an ad hoc `tiedValue="default"`, where it wins over
   the abstraction's default. Without one, an input nothing connects is treated like any other, whatever
   its default. This is 7.5.5 and Table C.2 of the standard, which `tests/test_scenarios.py` runs row by row.
-- **Ad hoc `tiedValue`:** a constant, `open` for `.port()`, or `default` for that default value. On a part
+- **Ad hoc `tiedValue`:** a constant, `open` for `.port()` on a whole port, or `default` for that default value. On a part
   select, `default` takes those bits of the default. A port's drivers can each cover a range of its bits.
 - **Transactional and phantom ports:** left out, as an RTL view of the component does not have them.
 
@@ -248,8 +250,9 @@ It raises `ValueError` rather than writing wrong RTL:
 - a value on a reference to a design or a design configuration, or on a hierarchical instance, for a parameter
   that document or component does not have, and values for one design configuration when the design is linked
   with another;
-- on a generated module: a type parameter, a parameter whose type is a typedef without its package, one whose
-  value cannot be compared, such as an assignment pattern, and one named like a port or an instance (D36);
+- on a generated module: a type parameter, a parameter whose value cannot be compared, such as an assignment
+  pattern, and one named like a port or an instance (D36);
+- `tiedValue="open"` on a part of a port, as only a whole port can be left open;
 - a name in a parameter's value that no parameter in scope explains, and a typedef whose name has no package,
   which a generated module could not see;
 - address windows that overlap on one decoder or pass the end of their bus's address space, a window with no
