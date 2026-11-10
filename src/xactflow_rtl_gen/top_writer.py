@@ -51,6 +51,13 @@ _TRANSFORM_NAME = re.compile(r"""transform\s+name=["']([^"']+)["']""")
 _BOOLEANS = {"true": "1'b1", "false": "1'b0"}  # IP-XACT's spelling, which evaluate() does not read
 _BIT_TYPES = {"logic", "wire", "reg", "bit"}  # sized by their vectors
 _SIZED_TYPES = {"byte": 8, "shortint": 16, "int": 32, "integer": 32, "longint": 64, "time": 64}
+# A type as text: what it is made of, then its packed dimensions. `logic [W-1:0]`, `pkg::req_t`, `T [3:0]`.
+_TYPE = re.compile(
+    r"(?P<base>(?:logic|bit|reg)(?:\s+unsigned)?|[A-Za-z_][\w$]*(?:::[A-Za-z_][\w$]*)*)\s*(?P<dimensions>(?:\[[^\[\]]*\]\s*)*)"
+)
+_NAMED_TYPE = re.compile(r"[A-Za-z_][\w$]*(?:::[A-Za-z_][\w$]*)*(?:\s+(?:un)?signed)?")  # a typedef, or int unsigned
+_BIT_VECTOR = re.compile(r"(?:logic|bit|reg)(?:\s+unsigned)?\s*(?:\[[^\[\]]*\]\s*)*")
+_DIMENSION = re.compile(r"\[([^\[\]]*)\]")
 
 _IN = ipxact.Direction.IN
 _OUT = ipxact.Direction.OUT
@@ -65,6 +72,28 @@ _Bounds = Tuple[int, int]
 def _text(value: object) -> str:
     """The text of an Expression or TextValue, or of a plain string."""
     return str(getattr(value, "value", value))
+
+
+def _two_bounds(dimension: str) -> Optional[Tuple[str, str]]:
+    """The left and right of a dimension written `left:right`. The colon between them is the one outside any
+    brackets that belongs to no `pkg::name` and to no `condition ? a : b`."""
+    depth = pending = 0
+    found = []
+    for position, character in enumerate(dimension):
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        elif depth == 0 and character == "?":
+            pending += 1
+        elif depth == 0 and character == ":" and dimension[position - 1 : position] != ":" and dimension[position + 1 : position + 2] != ":":
+            if pending:
+                pending -= 1
+            else:
+                found.append(position)
+    if len(found) != 1:
+        return None
+    return dimension[: found[0]].strip(), dimension[found[0] + 1 :].strip()
 
 
 def _check_identifier(name: str, what: str) -> None:
@@ -161,7 +190,8 @@ def _bits_needed(value: int) -> int:
 
 
 def _sv_string(text: str) -> str:
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A string literal for a message: $error reads it as a format, so a percent sign is doubled."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
 def _sv_number(value: Union[int, float]) -> str:
@@ -239,6 +269,24 @@ def _says_more_than_numbers(text: str, resolve: _Resolver, seen: Tuple[str, ...]
     return False
 
 
+def _check_is_one_value(text: str, where: str) -> None:
+    """A value is written between the brackets of `.NAME(...)`, so it has to stay there: its own brackets
+    closed, and no comma or semicolon outside them."""
+    depth = 0
+    for token in re.finditer(r'"(?:[^"\\]|\\.)*"|[()\[\]{},;]', text):
+        character = token.group(0)
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        if depth < 0 or (depth == 0 and character in ",;"):
+            break
+    else:
+        if depth == 0:
+            return
+    raise ValueError(f"{where}: {text!r} is not one value")
+
+
 def _single_token(text: str) -> bool:
     tokens = list(_TOKEN.finditer(text))
     return len(tokens) == 1 and tokens[0].group(0) == text.strip()
@@ -261,6 +309,16 @@ def _resolved_text(
     text = _TOKEN.sub(lambda t: _BOOLEANS[t.group(0)] if t.group(0) in _BOOLEANS else t.group(0), text.strip())
     if not text:
         raise ValueError(f"{where}: the value is empty")
+    _check_is_one_value(text, where)
+    if _BIT_VECTOR.fullmatch(text) and "[" in text:
+        # A type, as a type parameter has for its value: each bound is a value of its own (D31).
+        def bound(dimension: "re.Match[str]") -> str:
+            sides = _two_bounds(dimension.group(1))
+            if sides is None:
+                raise ValueError(f"{where}: cannot work out the dimension {dimension.group(0)} of {text!r}")
+            return "[" + ":".join(_resolved_text(side, resolve, where, seen, keep_unknown) for side in sides) + "]"
+
+        return _DIMENSION.sub(bound, text)
     names = _names_in(text)
     parameters = [name for name in names if _parameter_of(name, resolve) is not None]
     unknown = [name for name in names if name not in parameters and name not in SYSTEMVERILOG_KEYWORDS]
@@ -290,6 +348,13 @@ def _resolved_text(
         return _worked_out(text, resolve)
     except ExpressionError as exc:
         if _says_more_than_numbers(text, resolve):
+            if _IDENTIFIER.fullmatch(text):
+                # A parameter whose value only the compiler can finish, such as a call of a package's function:
+                # its value stands in for it. Filling in the name itself would come straight back here.
+                parameter = _parameter_of(text, resolve)
+                if _is_typed(parameter):
+                    raise ValueError(f"{where}: cannot work out {text!r}, a {parameter.type} whose value is {_text(parameter.value)!r}") from exc
+                return _resolved_text(_text(parameter.value), resolve, where, (*seen, text), keep_unknown)
             return _with_numbers_filled_in(text, resolve, where, seen, keep_unknown)
         raise ValueError(f"{where}: cannot evaluate {text!r}: {exc}") from exc
     except (OverflowError, ValueError, MemoryError, RecursionError) as exc:
@@ -354,13 +419,21 @@ class _Port:
     sub_types: Dict[str, str] = field(default_factory=dict)  # sub-ports of a named type, such as an enum
     unpacked: Set[str] = field(default_factory=set)  # paths of unpacked structs, "" likewise
     unsupported: Optional[str] = None  # why nothing can connect to it: it can only be left open
+    element: Optional[str] = None  # the type of one element, when the port is a one-dimensional array of a type (D32)
 
     @property
     def label(self) -> str:
         return f"{self.instance}.{self.name}" if self.instance else self.name
 
+    def elements(self) -> List[str]:
+        """The elements of an array of a type, as `[3]`; a port that is not one is a single part, ``."""
+        if self.width is not None or self.element is None:
+            return [""]
+        low, high = sorted(self.vectors[0])
+        return [f"[{index}]" for index in range(low, high + 1)]
+
     def undriven(self) -> List[object]:
-        """The bits or sub-ports nothing drives yet, as far as this port's declaration can tell."""
+        """The bits, elements or sub-ports nothing drives yet, as far as this port's declaration can tell."""
         if self.width is not None:
             return sorted(self.all_keys - self.driven)
         if not self.driven:
@@ -368,10 +441,20 @@ class _Port:
         if "*" in self.driven:
             return []
 
-        def covered(leaf: str, part: object) -> bool:
-            return leaf == part or leaf.startswith(f"{part}.") or (leaf in self.undeclared and str(part).startswith(f"{leaf}."))
+        def covered(leaf: str, part: str) -> bool:
+            return leaf == part or leaf.startswith(f"{part}.") or (leaf in self.undeclared and part.startswith(f"{leaf}."))
 
-        return [leaf for leaf in self.leaves if not any(covered(leaf, part) for part in self.driven)]
+        missing: List[object] = []
+        for element in self.elements():
+            if element and element in self.driven:
+                continue
+            # What is driven inside this element, as sub-port paths.
+            parts = [str(part)[len(element) :] for part in self.driven if str(part).startswith(f"{element}.")]
+            if element and not parts:
+                missing.append(f"element {element}")
+                continue
+            missing.extend(f"{element}{leaf}" for leaf in self.leaves if not any(covered(leaf, part) for part in parts))
+        return missing
 
 
 @dataclass
@@ -402,6 +485,8 @@ class _Terminal:
     invert: bool = False
     bits: Optional[int] = None  # the size of a struct or sub-port, whose width is None
     unchecked: bool = False  # a sub-port of a struct that doesn't list them: nothing here says its size
+    path: str = ""  # the sub-port inside the port, or inside the element of it that `select` starts with
+    kind: Optional[Tuple[str, int]] = None  # of a type only the compiler knows: the type, and how many of it
 
     @property
     def size(self) -> Optional[int]:
@@ -492,14 +577,22 @@ def _selected_view(component: ipxact.Component, view_name: Optional[str], where:
 
 
 def _component_instantiation(
-    component: ipxact.Component, view: Optional[ipxact.View]
+    component: ipxact.Component, view: Optional[ipxact.View], where: str
 ) -> Optional[ipxact.ComponentInstantiation]:
-    if view is None or not view.component_instantiation_ref:
+    """The component instantiation a view refers to. A component with no view that instantiates anything takes
+    its only component instantiation, as some tools write a module's name and parameters with no view (D33)."""
+    if view is None:
+        instantiations = component.model.component_instantiations if component.model is not None else []
+        if len(instantiations) > 1:
+            names = ", ".join(i.name for i in instantiations)
+            raise ValueError(f"{where}: {component.vlnv} has no view to choose between its component instantiations: {names}")
+        return instantiations[0] if instantiations else None
+    if not view.component_instantiation_ref:
         return None
     for instantiation in component.model.component_instantiations:
         if instantiation.name == view.component_instantiation_ref:
             return instantiation
-    return None
+    raise ValueError(f"{where}: view {view.name!r} of {component.vlnv} refers to a missing component instantiation, {view.component_instantiation_ref!r}")
 
 
 def _design_of_view(
@@ -616,7 +709,8 @@ def _derived_in_the_hdl(text: str, resolve: _Resolver, module_names: Set[str]) -
         if parameter is None:
             return False
         source = _text(parameter.value)
-    names = _names_in(source)
+    # A keyword names no parameter: a type parameter's `logic [WIDTH-1:0]` is derived from WIDTH alone.
+    names = [name for name in _names_in(source) if name not in SYSTEMVERILOG_KEYWORDS]
     return bool(names) and all(name in module_names for name in names)
 
 
@@ -651,6 +745,7 @@ def _instance_parameters(
     module_names = {p.name for p in module_parameters}
     result = []
     for parameter in module_parameters:
+        _check_identifier(parameter.name, f"{where}: module parameter")
         if parameter.name in given:
             result.append((parameter.name, given[parameter.name]))
             continue
@@ -722,6 +817,68 @@ def _wire_type(wire: ipxact.WirePort, view: Optional[ipxact.View]) -> str:
     return "logic" if declared is None or declared in _BIT_TYPES else declared
 
 
+def _type_parameters(instantiation: Optional[ipxact.ComponentInstantiation]) -> Dict[str, ipxact.ModuleParameter]:
+    """The module parameters that stand for a type, as SystemVerilog's `parameter type` does, by name."""
+    if instantiation is None:
+        return {}
+    return {p.name: p for p in instantiation.module_parameters if (p.data_type or "").strip() == "type"}
+
+
+def _type_parameter_value(parameter: ipxact.ModuleParameter, resolve: _Resolver) -> str:
+    """The type a type parameter stands for in this instance, as text: its own value, or that of the
+    parameter its value names, as an importer writes it, with any override on either."""
+    text = _text(parameter.value).strip()
+    own = _parameter_of(parameter.parameter_id, resolve) if parameter.parameter_id else None
+    if own is not None:
+        text = _text(own.value).strip()
+    followed: Set[str] = set()
+    while _IDENTIFIER.fullmatch(text) and text not in followed:
+        named = _parameter_of(text, resolve)
+        if named is None:
+            break
+        followed.add(text)
+        text = _text(named.value).strip()
+    return text
+
+
+def _bounds_in(dimensions: str, resolve: _Resolver, where: str) -> List[_Bounds]:
+    """The packed dimensions written in a type, `[7:0][3:0]`, outermost first."""
+    bounds = []
+    for dimension in _DIMENSION.finditer(dimensions):
+        sides = _two_bounds(dimension.group(1))
+        if sides is None:
+            raise ValueError(f"{where}: cannot work out the dimension {dimension.group(0)}")
+        bounds.append((_number(sides[0], resolve, f"{where} left bound"), _number(sides[1], resolve, f"{where} right bound")))
+    return bounds
+
+
+def _type_in_this_instance(
+    type_name: str, types: Dict[str, ipxact.ModuleParameter], resolve: _Resolver, where: str, seen: Tuple[str, ...] = ()
+) -> Tuple[str, List[_Bounds]]:
+    """The type a port is declared with, and the packed dimensions written in it, which an importer may leave
+    in the type's name: `pkg::req_t [N-1:0]`. Where the type is a type parameter, it is the type this instance
+    gives that parameter, with the dimensions that type brings (D31). Text that is not a type and dimensions
+    comes back as it is."""
+    match = _TYPE.fullmatch(type_name.strip())
+    if match is None:
+        return type_name, []
+    name = match.group("base")
+    own = _bounds_in(match.group("dimensions"), resolve, where)
+    if name not in types:
+        return name, own
+    if name in seen:
+        raise ValueError(f"{where}: type parameter {' -> '.join((*seen, name))} refers to itself")
+    value = _type_parameter_value(types[name], resolve)
+    inner = _TYPE.fullmatch(value)
+    if inner is None:
+        raise ValueError(f"{where}: cannot work out {value!r}, the type that type parameter {name} stands for here")
+    if inner.group("base") in types:
+        base, bounds = _type_in_this_instance(value, types, resolve, where, (*seen, name))
+    else:
+        base, bounds = inner.group("base"), _bounds_in(inner.group("dimensions"), resolve, f"{where}: type parameter {name}")
+    return base, [*own, *bounds]
+
+
 @dataclass
 class _Shape:
     """What a struct's declaration says about it."""
@@ -778,9 +935,15 @@ def _struct_shape(fields: ipxact.StructuredPort, resolve: _Resolver, view: Optio
 
 
 def _build_port(
-    owner: str, port: ipxact.Port, resolve: _Resolver, is_top: bool = False, view: Optional[ipxact.View] = None
+    owner: str,
+    port: ipxact.Port,
+    resolve: _Resolver,
+    is_top: bool = False,
+    view: Optional[ipxact.View] = None,
+    types: Optional[Dict[str, ipxact.ModuleParameter]] = None,
 ) -> Optional[_Port]:
-    """The port as this generator sees it, or None when it has no net in RTL."""
+    """The port as this generator sees it, or None when it has no net in RTL. `types` holds the type
+    parameters of the module the port belongs to, which its type may be one of."""
     where = f"{owner}.{port.name}"
     _check_identifier(port.name, f"{owner}: port name")
     if port.transactional is not None:
@@ -789,7 +952,7 @@ def _build_port(
         if is_top:
             raise ValueError(f"{where}: unpacked array ports are not supported yet")
         # An instance's output can still be left open, which needs nothing of its shape.
-        built = _build_port(owner, dataclasses.replace(port, arrays=[]), resolve, is_top, view)
+        built = _build_port(owner, dataclasses.replace(port, arrays=[]), resolve, is_top, view, types)
         if built is not None:
             built.unsupported = "unpacked array ports are not supported yet, except an output left open"
         return built
@@ -806,25 +969,38 @@ def _build_port(
     else:
         raise ValueError(f"{where}: interface ports are not supported yet")
 
+    # A type parameter stands for the type this instance gives it, which may be a plain vector of bits (D31).
+    is_struct = port.wire is None
+    type_name, from_type = _type_in_this_instance(type_name, types or {}, resolve, where)
+    if type_name.split()[0] in _BIT_TYPES:
+        if is_struct and port.structured.sub_ports:
+            raise ValueError(f"{where}: the port lists sub-ports, and its type is {type_name}")
+        type_name, is_struct = "logic", False
+    elif not _NAMED_TYPE.fullmatch(type_name):
+        # It is written into the module as it stands, so it has to be a type's name and nothing else.
+        raise ValueError(f"{where}: {type_name!r} is not a type this version can declare")
+
     if direction is ipxact.Direction.PHANTOM:
         return None
     if direction is None:
         raise ValueError(f"{where}: the port has no direction")
     if direction is _INOUT:
-        if port.wire is None or type_name != "logic":
+        if is_struct or type_name != "logic":
             raise ValueError(f"{where}: an inout port of type {type_name} is not supported yet")
         type_name = "wire"  # an inout has to be a net, it cannot be a logic variable
 
-    bounds = _vector_bounds(vectors, resolve, where)
+    bounds = [*_vector_bounds(vectors, resolve, where), *from_type]
     declaration = type_name + (" " if bounds else "") + "".join(f"[{left}:{right}]" for left, right in bounds)
     inside = _FROM_INSIDE[direction] if is_top else direction
     net = port.name if is_top else None
-    if port.wire is None:
+    element = type_name if len(bounds) == 1 else None  # what one element is, of a one-dimensional array of a type
+    if is_struct:
         shape = _struct_shape(port.structured, resolve, view, where)
         return _Port(
-            owner, port.name, inside, declaration, None, {"*"}, is_top=is_top, net=net, vectors=bounds, bits=shape.bits,
+            owner, port.name, inside, declaration, None, {"*"}, is_top=is_top, net=net, vectors=bounds,
+            bits=shape.bits * _size_of_bounds(from_type) if shape.bits is not None else None,
             leaves=shape.leaves, sub_bits=shape.sub_bits, unions=shape.unions, undeclared=shape.undeclared,
-            sub_types=shape.sub_types, unpacked=shape.unpacked,
+            sub_types=shape.sub_types, unpacked=shape.unpacked, element=element,
         )
     if type_name in _SIZED_TYPES:
         if bounds:
@@ -832,7 +1008,7 @@ def _build_port(
         width = _SIZED_TYPES[type_name]
         return _Port(owner, port.name, inside, declaration, width, set(range(width)), is_top=is_top, net=net, vectors=[(width - 1, 0)])
     if type_name not in ("logic", "wire"):  # a typedef: only the compiler knows its width
-        return _Port(owner, port.name, inside, declaration, None, {"*"}, is_top=is_top, net=net, vectors=bounds)
+        return _Port(owner, port.name, inside, declaration, None, {"*"}, is_top=is_top, net=net, vectors=bounds, element=element)
     width = _size_of_bounds(bounds)
     if width > _MAX_PORT_BITS:
         raise ValueError(f"{where}: a port of {width} bits is not supported")
@@ -1002,7 +1178,7 @@ class _ModuleBuilder:
             return
         where = f"top component {component.vlnv}"
         view = self.top_view or _view_holding_design(self.linked.library, component, self.linked.vlnv)
-        instantiation = _component_instantiation(component, view)
+        instantiation = _component_instantiation(component, view, where) if view is not None else None
         if instantiation is not None and instantiation.module_parameters:
             raise ValueError(f"{where}: module parameters on the top component are not supported yet")
         self.module = instantiation.module_name if instantiation is not None and instantiation.module_name else component.vlnv.name
@@ -1032,7 +1208,7 @@ class _ModuleBuilder:
             view.component_instantiation_ref or view.design_instantiation_ref or view.design_configuration_instantiation_ref
         ):
             raise ValueError(f"{where}: the design configuration selects view {view.name!r}, which instantiates nothing")
-        instantiation = _component_instantiation(component, view)
+        instantiation = _component_instantiation(component, view, where)
         module = instantiation.module_name if instantiation is not None and instantiation.module_name else component.vlnv.name
         _check_identifier(module, f"{where}: module name")
 
@@ -1058,8 +1234,9 @@ class _ModuleBuilder:
 
         ports: Dict[str, _Port] = {}
         skipped: Set[str] = set()
+        types = _type_parameters(instantiation)
         for port in component.model.ports if component.model is not None else []:
-            built = _build_port(name, port, resolve, view=view)
+            built = _build_port(name, port, resolve, view=view, types=types)
             if built is None:
                 skipped.add(port.name)
             else:
@@ -1178,28 +1355,41 @@ class _ModuleBuilder:
             raise ValueError(f"{where}: {owner.name} has no port {port_name!r}")
         if port.unsupported:
             raise ValueError(f"{where}: {port.label}: {port.unsupported}")
+        resolve = resolve or owner.resolve
+        index, picked = "", [""]  # the elements a part select picks from an array of a type (D32)
+        if part_select is not None and port.width is None:
+            index, picked = self._elements_selected(port, part_select, resolve, where)
+            part_select = None
         if sub_port_refs:
             if part_select is not None or any(r.part_select is not None for r in sub_port_refs):
                 raise ValueError(f"{where}: a part select on a subPort is not supported yet")
             path = "".join(f".{r.sub_port_ref}" for r in sub_port_refs)
-            if "[" in port.declaration:
+            if len(picked) > 1:
+                raise ValueError(f"{where}: a sub-port of {port.label}{index}, which is {len(picked)} elements, has no meaning")
+            if "[" in port.declaration and not index:
                 raise ValueError(f"{where}: a sub-port of {port.label}, an array of {port.declaration}, is not supported yet")
             unchecked = any(path == outer or path.startswith(f"{outer}.") for outer in port.undeclared)
             if path not in port.sub_bits and not unchecked:
                 raise ValueError(f"{where}: {port.label} has no sub-port {path!r}")
             # The members of a union are the same bits, so driving one is driving the whole union.
             union = min((u for u in port.unions if path.startswith(f"{u}.")), key=len, default=None)
-            keys: Set[object] = {path} if union is None else {union or "*"}
-            return _Terminal(port, path, None, keys, invert, port.sub_bits.get(path), unchecked)
+            keys: Set[object] = {f"{index}{path if union is None else union}" or "*"}
+            return _Terminal(port, f"{index}{path}", None, keys, invert, port.sub_bits.get(path), unchecked, path)
+        if index:
+            each = port.bits // len(port.elements()) if port.bits is not None else None
+            bits = each * len(picked) if each is not None else None
+            return _Terminal(port, index, None, set(picked), invert, bits, kind=(_plain_type(port.element), len(picked)))
         if part_select is None:
-            return _Terminal(port, "", port.width, set(port.all_keys), invert, port.bits)
-        if port.width is None:
-            raise ValueError(f"{where}: a part select on {port.label}, a {port.declaration}, is not supported yet")
+            kind = None
+            if port.width is None and port.element is not None:
+                kind = (_plain_type(port.element), len(port.elements()))
+            elif port.width is None and not port.vectors:
+                kind = (_plain_type(port.declaration), 1)
+            return _Terminal(port, "", port.width, set(port.all_keys), invert, port.bits, kind=kind)
         if part_select.indices or part_select.range is None:
             raise ValueError(f"{where}: an indexed part select is not supported yet")
         if len(port.vectors) > 1:
             raise ValueError(f"{where}: a part select on {port.label}, which has several dimensions, is not supported yet")
-        resolve = resolve or owner.resolve
         left = _number(part_select.range.left, resolve, where)
         right = _number(part_select.range.right, resolve, where)
         low, high = sorted((left, right))
@@ -1209,6 +1399,25 @@ class _ModuleBuilder:
             raise ValueError(f"{where}: part select [{left}:{right}] runs the other way from port {port.label}, a {port.declaration}")
         select = "" if port.width == 1 and not port.vectors else f"[{left}:{right}]"  # a scalar has nothing to select
         return _Terminal(port, select, high - low + 1, set(range(low, high + 1)), invert)
+
+    @staticmethod
+    def _elements_selected(port: _Port, part_select: ipxact.PartSelect, resolve: _Resolver, where: str) -> Tuple[str, List[str]]:
+        """What a part select picks from a one-dimensional array of a type only the compiler knows (D32):
+        `[3]` for one element, which may then have sub-ports, or `[5:2]` for a run of them. Returns it as
+        SystemVerilog, and the elements it covers."""
+        if port.element is None:
+            raise ValueError(f"{where}: a part select on {port.label}, a {port.declaration}, is not supported yet")
+        if part_select.indices or part_select.range is None:
+            raise ValueError(f"{where}: an indexed part select is not supported yet")
+        left = _number(part_select.range.left, resolve, where)
+        right = _number(part_select.range.right, resolve, where)
+        low, high = sorted((left, right))
+        first, last = sorted(port.vectors[0])
+        if low < first or high > last:
+            raise ValueError(f"{where}: part select [{left}:{right}] is outside port {port.label}, a {port.declaration}")
+        if left != right and (left > right) != (port.vectors[0][0] > port.vectors[0][1]):
+            raise ValueError(f"{where}: part select [{left}:{right}] runs the other way from port {port.label}, a {port.declaration}")
+        return (f"[{left}]" if left == right else f"[{left}:{right}]"), [f"[{i}]" for i in range(low, high + 1)]
 
     @staticmethod
     def _check_sizes(sink: _Terminal, source: _Terminal, where: str) -> None:
@@ -1222,6 +1431,8 @@ class _ModuleBuilder:
             return
         if sink.unchecked or source.unchecked:
             return  # a sub-port of a struct that doesn't list them: nothing here says how wide it is
+        if sink.kind is not None and sink.kind == source.kind:
+            return  # as many of the same type, whatever its width: an element of an array is one of them
         if not sink.select and not source.select and _plain_type(sink.port.declaration) == _plain_type(source.port.declaration):
             return  # the same type, whatever its width
         raise ValueError(
@@ -1240,17 +1451,28 @@ class _ModuleBuilder:
             raise ValueError(f"{where}: {sink.port.label}{sink.select} is already driven by another connection")
         cast = needs = None
         if isinstance(source, str) or source.invert:
-            whole = not sink.select and sink.port.width is None
-            if (sink.select if sink.select.startswith(".") else "" if whole else None) in sink.port.unpacked:
+            typed = sink.port.width is None
+            if (sink.path or ("" if typed else None)) in sink.port.unpacked:
                 raise ValueError(f"{where}: a constant or an inversion into {sink.port.label}{sink.select}, an unpacked struct, is not supported yet")
             # A typedef such as an enum takes no plain number or inverted vector without a cast.
-            type_name = sink.port.declaration if whole else sink.port.sub_types.get(sink.select)
+            if sink.path:
+                type_name = sink.port.sub_types.get(sink.path)
+            elif not typed:
+                type_name = None
+            elif not sink.select:
+                type_name = sink.port.declaration
+            elif sink.kind is not None and sink.kind[1] == 1:
+                type_name = sink.port.element  # one element of an array of the type
+            else:
+                type_name = f"{sink.port.element} [{sink.kind[1] - 1}:0]"
             if type_name is not None:
                 if not re.fullmatch(r"[\w$]+(::[\w$]+)*", type_name):
                     raise ValueError(f"{where}: a constant or an inversion into {sink.port.label}{sink.select}, a {type_name}, is not supported yet")
                 cast = type_name
             if value is not None and sink.size is None and _bits_needed(value) > 1:
                 needs = (value, _bits_needed(value), where)  # only the compiler knows the width: it checks the constant fits
+            if source == "-1" and cast is None:
+                source = "'1"  # all ones at whatever width the sink has, where -1 is a signed number cut to fit
         driven |= sink.keys
         block.assigns.append(_Assign(sink, source, note, cast, needs))
 
@@ -1708,12 +1930,22 @@ class _ModuleBuilder:
         return bits
 
     def _connect_top_ports_directly(self) -> None:
-        """A whole port wired to one of the module's own ports needs no net in between."""
+        """A whole port wired to one of the module's own ports needs no net in between. The instance's port
+        then goes by the module port's name, so a part of it taken elsewhere, `[3:0]`, has to mean the same
+        bits of both: a port that has parts taken only connects directly when the two number their bits alike
+        (D35)."""
+        in_parts = set()  # the ports some connection takes a part of
+        for block in self.blocks:
+            for assign in block.assigns:
+                for end in (assign.sink, assign.source):
+                    if isinstance(end, _Terminal) and end.select:
+                        in_parts.add(id(end.port))
         for block in self.blocks:
             kept = []
             for assign in block.assigns:
                 sink, source = assign.sink, assign.source
                 whole = isinstance(source, _Terminal) and not (source.invert or source.select or sink.select)
+                whole = whole and (sink.port.vectors == source.port.vectors or not {id(sink.port), id(source.port)} & in_parts)
                 if whole and self._is_module_port(source.port) and not self._is_module_port(sink.port) and sink.port.net is None and source.port.direction is _OUT:
                     sink.port.net = source.port.net
                 elif whole and self._is_module_port(sink.port) and not self._is_module_port(source.port) and source.port.net is None and sink.port.direction is _IN:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import ipxact
+import pytest
 from pyslang import ast, syntax
 from xactflow import Library, link
 
@@ -301,6 +302,43 @@ def verilator_lint(tmp_path: Path, files: Dict[str, str], sources: Sequence[str]
 
 
 has_icarus = shutil.which("iverilog") is not None
+has_verilator = shutil.which("verilator") is not None
+
+
+def files_of(the_design, documents, configuration=None, buses=None, **options):
+    library = library_of([*(bus_documents() if buses is None else buses), *documents, the_design])
+    return generate_files(link(the_design, library, configuration), **options)
+
+
+def passes(
+    tmp_path, the_design, documents, source, module="soc", drive=None, expect=None, configuration=None, buses=None, packages="", lint=True,
+    simulation=True,
+):  # fmt: skip
+    """Compiles without complaint in all three tools, and passes a simulation. `packages` are compiled first.
+    `simulation` is False where the Icarus at hand cannot read what the design needs."""
+    files = files_of(the_design, documents, configuration, buses)
+    tools_see = {**files, "ip_types_pkg.sv": packages} if packages else files
+    ordered = [text for _, text in sorted(tools_see.items(), key=lambda item: not item[0].endswith("_pkg.sv"))]
+    assert slang_errors(*ordered, source) == []
+    if has_verilator and lint:
+        result = verilator_lint(tmp_path, tools_see, [source], module)
+        assert result.returncode == 0, result.stderr
+    if has_icarus and simulation:
+        assert "PASS" in simulate(tmp_path, tools_see, [source], testbench(module, drive or {}, expect or {}))
+    return files
+
+
+def refused(match, the_design, documents, configuration=None, buses=None, **options):
+    with pytest.raises(ValueError, match=match):
+        files_of(the_design, documents, configuration, buses, **options)
+
+
+def icarus_reads(tmp_path: Path, source: str) -> bool:
+    """Whether the Icarus at hand compiles this: older ones lack parts of SystemVerilog."""
+    probe = tmp_path / "icarus_probe.sv"
+    probe.write_text(source)
+    compiled = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "icarus_probe.vvp"), str(probe)], capture_output=True, text=True)
+    return compiled.returncode == 0
 
 
 def icarus_runs_elaboration_tasks_in_generate_blocks(tmp_path: Path) -> bool:
@@ -309,7 +347,6 @@ def icarus_runs_elaboration_tasks_in_generate_blocks(tmp_path: Path) -> bool:
     probe.write_text('module probe; if (1) begin : check $error("stop"); end endmodule\n')
     compiled = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "probe.vvp"), str(probe)], capture_output=True, text=True)
     return compiled.returncode != 0
-has_verilator = shutil.which("verilator") is not None
 
 
 @dataclass

@@ -87,8 +87,9 @@ Every connected instance port gets its own net, `<instance>_<port>`, and each co
 That one shape covers part selects, inverted port maps, tie-offs and struct sub-ports. Two things add a
 net of their own: a logical port mapped in slices, called `<connection>_<logical port>`, and an inout,
 which has to share a net with what it connects to. A whole port wired to one of the module's own ports
-connects directly, with no net in between. A net's name gets `_net` added if it would be a keyword, or
-already belongs to an instance or a port.
+connects directly, with no net in between, unless a part of it is taken elsewhere and the two number their
+bits differently (D35). A net's name gets `_net` added if it would be a keyword, or already belongs to an
+instance or a port.
 
 ## Where the module's ports come from
 
@@ -107,7 +108,7 @@ the component can say which ports those are.
 ## How connections are decided
 
 - **Module name of an instance:** the configured view's `moduleName`, else the first view with an
-  instantiation, else the VLNV name.
+  instantiation, else the VLNV name. A component with no view takes its only component instantiation (D33).
 - **A view's choices:** an instance uses the abstraction type, driver and type definitions of its view.
 - **A design configuration:** the one given to `link()`, else the one the hierarchical component's view
   holds, at any depth.
@@ -128,6 +129,15 @@ the component can say which ports those are.
   string or something in a package, goes to the compiler with the numbers filled in. Overrides are applied
   here, since `link()` does not. A `runtime` parameter is left off the instance, and an override on one is
   refused.
+- **Type parameters:** a module parameter whose `dataType` is `type`, as `xactflow-sv` imports SystemVerilog's
+  `parameter type`, stands for a type. A port of that type is declared with the type its instance gives the
+  parameter, such as `croc_pkg::sbr_obi_req_t`. Where that is `logic [W-1:0]` the port is a plain vector, and its
+  width is checked like any other. A type parameter the HDL works out from its other parameters is left to
+  it (D31).
+- **Arrays of structs:** on a port that is a packed array of a struct, a part select picks elements. `[3:3]` is
+  the element `[3]`: it connects to a struct of that type, and can have sub-ports, `[3].a.addr`, in a port map
+  as in a design. A longer range connects whole to an array of as many. Every element of such an input has to
+  be driven, whole or member by member (D32).
 - **Expressions in the design:** part selects and tied values see the design's parameters, and then those
   of its hierarchical component, not the instance's. Values in a design configuration see its own first.
 - **Constants on a net:** `'1` is all ones at that net's width. On a port or sub-port of a named type, such as
@@ -196,6 +206,8 @@ It raises `ValueError` rather than writing wrong RTL:
 - a constant or an inversion into an unpacked struct;
 - an input driven twice or only partly, a logical port with two drivers, two different tie-offs, or a real
   driver and a tie-off on an end that would drive it, and logical bits read but never driven;
+- an element of an array of structs that nothing drives, and a member of one, where the component lists the
+  struct's members;
 - a top-level output nothing drives;
 - a constant that does not fit its port, positive or negative, which would silently lose bits (for a type only the
   compiler knows the width of, the compiler refuses it, through the check above);
@@ -213,20 +225,29 @@ It raises `ValueError` rather than writing wrong RTL:
 - a design that contains itself, two different modules with the same name, and a generated module named like
   the module of an IP;
 - a name that is not a valid SystemVerilog identifier or is a keyword, such as a component called
-  `interconnect`, and an instance named like a port of the module.
+  `interconnect`, and an instance named like a port of the module;
+- what would not stay where it is written: a parameter value that is not one value, a module parameter whose
+  name is no identifier, and a type that is more than a type's name (D34);
+- a view that names a component instantiation its component lacks, and a component with several component
+  instantiations and no view to choose one.
 
 ## Limitations
 
 - **Decoding is not generated.** The address map is data for a decoder that already exists. Nothing writes
   the crossbar itself.
 - **Each error below is reported, not silently skipped.** Not supported yet: monitor interconnections,
-  unpacked arrays (an instance's output that nothing connects is left open, D28), interface ports, indexed part selects, a part select on an inout, a subPort, a struct or
-  a port with several dimensions, a part select running the other way from its port, a sub-port of an array
-  of structs, an abstraction's default next to tie-offs for some of its bits, an ascending logical range, an inverted inout, two inouts of the module on one net, logical slices on an inout of the module
+  unpacked arrays (an instance's output that nothing connects is left open, D28), interface ports, indexed part selects, a part select on an inout, a subPort, a struct that is not a
+  one-dimensional array, or a port with several dimensions, a part select running the other way from its port, a
+  sub-port of an array of structs with no element picked, a constant into several elements of one, an abstraction's default next to tie-offs for some of its bits, an ascending logical range, an inverted inout, two inouts of the module on one net, logical slices on an inout of the module
   not declared from bit 0, abstractors, and module parameters on the top component.
 - **A sub-port of a struct with no sub-ports listed cannot be width-checked.** `xactflow-sv` leaves them out.
   Nor is its type known, so a member that is an enum gets no cast, and slang and Verilator reject what drives it.
   Listing the sub-ports in the component fixes both (`docs/findings.md`, F2).
+- **A width has to be something XactFlow's evaluator can work out.** `xactflow-sv` copies a port's dimensions
+  from the module's header as they are written. A call of a package's function there, or a member of a
+  struct-valued parameter, such as `cf_math_pkg::idx_width(N)` or `Cfg.AddrWidth`, is refused: the component has
+  to give the number, or the function's body. A type the module gets through `import pkg::*` needs its package
+  in the component as well.
 - **Anything using a parameter goes through XactFlow's evaluator,** which simplifies some of SystemVerilog's
   rules on sign and width. A value written without parameters is the compiler's to work out, so if it also
   sizes a port, in a way the two read differently, they can disagree. Tools warn about the port width.
@@ -267,6 +288,23 @@ are differences to weigh, not proof:
 
 Kactus2 also generates Verilog that does not compile if a top-level port is called `<instance>_<port>`.
 
+## Tried on real designs
+
+Besides its own tests, the exporter is run on whole SoCs, each chosen for a kind of input the others lack (D24
+in `docs/decisions.md`). The scripts for these are kept outside this repository.
+
+- **[Didactic SoC](https://github.com/Edu4Chip/Didactic-SoC)** (Edu4Chip): an IEEE 1685-2022 library made in
+  Kactus2, with three levels of hierarchy and design configurations. All eight modules generate, and every bit
+  of every instance is driven as in the Verilog Kactus2 generated, but for eight bits of one port that the RTL
+  makes narrower than the IP-XACT. Elaborated with the RTL in Didactic's repository, the generated modules fit
+  it, once four module parameters the RTL does not have are taken out of one component.
+- **[Croc](https://github.com/pulp-platform/croc)** (PULP): a hand-written SoC of IPs with type parameters and
+  struct ports. Its `croc_soc` and `croc_domain` were described in IP-XACT, from components `xactflow-sv`
+  imported, and generated. With the generated modules in place of the hand-written ones, Croc's testbench
+  elaborates in slang and lints in Verilator with the same messages, and each of the 3769 port bits traced has
+  the same driver, and each of the 110 instance parameters the same value. Croc's firmware, nine programs run
+  in Verilator, passes on both and prints the same lines at the same simulation times.
+
 ## Development
 
 ```bash
@@ -278,6 +316,8 @@ Kactus2 also generates Verilog that does not compile if a top-level port is call
 - `tests/test_address_map.py` decodes real addresses through a generated module.
 - `tests/test_exporter.py` and `tests/test_top_component.py` hold the rules around these, and every refusal.
 - `tests/test_adversarial.py` holds designs written to get wrong RTL past the exporter, and that once did.
+- `tests/test_type_parameters.py` holds type parameters and arrays of structs as PULP's IPs have them, the last
+  of them imported by `xactflow-sv` itself.
 
 Verilator and Icarus Verilog are skipped when not installed; slang always runs. CI installs both from Ubuntu's
 packages.

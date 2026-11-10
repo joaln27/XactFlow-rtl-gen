@@ -40,6 +40,7 @@ dev = [
     "pyslang>=10.0.0",
     "xactflow-archidesc>=0.1.1",
     "xactflow-design>=0.2.0",
+    "xactflow-sv>=0.1.2",
 ]
 
 [project.entry-points."xactflow.exporters"]

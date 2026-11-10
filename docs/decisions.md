@@ -48,7 +48,8 @@ rounds are an adversarial AI agent attacking it.
 
 - **Decision:** each connected instance port gets a net, `<instance>_<port>`, and each connection is an
   `assign`. Logical slices and inouts get a shared net. A whole port wired to a module port connects
-  directly. A net's name gives way, adding `_net`, when a keyword, instance or module port needs it.
+  directly, since D35 not where a part of it is taken and the bounds differ. A net's name gives way, adding `_net`, when a keyword,
+  instance or module port needs it.
 - **Why:** one shape covers part selects, inverts, tie-offs and sub-ports, and every line says who drives
   whom. It also makes bit-level comparison with other generators straightforward.
 - **Considered:** wiring instance ports to each other directly, which reads more compactly but makes
@@ -358,6 +359,34 @@ rounds are an adversarial AI agent attacking it.
     the exporter refused and Kactus2 connects to the low bits (D29).
   - **Result:** all eight modules generate. Every input and output bit of every instance connects as in Kactus2's
     Verilog, both the committed one and a fresh run, except the eight bits of the port the RTL makes narrower.
+  - **Against its RTL, on 2026-11-10:** the generated modules were elaborated in slang with the RTL Didactic's
+    repository holds, which has the module of 26 of their 36 instances. One more problem in the input showed:
+    the Ibex component lists four module parameters its RTL wrapper does not have. Kactus2 writes only the
+    parameters a design changes, which hides them; this exporter writes them all (D19), so the module would not
+    compile. The test now drops them. What is left is one inout of the pad frame's RTL that its component lacks.
+- **Croc, on 2026-11-10,** found new classes again, none of them silent wrong RTL. Its two hand-written modules,
+  `croc_soc` and `croc_domain`, were described in IP-XACT from components `xactflow-sv` imported.
+  - **Added to generate it:** type parameters (D31), and elements and members of ports that are arrays of structs
+    (D32). Before, each instance of a PULP IP was refused.
+  - **Fixed:** a parameter whose value calls a package's function, named by another parameter, recursed until
+    Python stopped it, and the error said so. Its value is now written out.
+  - **In the input, not the exporter,** and changed by the test after importing, as `xactflow-sv` reads a module's
+    header without elaborating it: a call of a package's function in a width, written out as its body; a member
+    of a struct-valued parameter in a width, replaced by its value; a type the module gets through
+    `import pkg::*`, given its package; and the modules' own parameters, as a generated module takes none (D26).
+    One glue module holds the three struct constants the hand-written module takes straight from packages,
+    which an IP-XACT `tiedValue` cannot name.
+  - **Result:** both modules generate, `croc_domain` as `croc_domain_1`, for the testbench's `GpioCount`. Croc's
+    whole testbench elaborates in slang and lints in Verilator with them in place, with the same messages as with
+    the hand-written ones. A trace of both elaborations finds the same driver for each of the 3769 input bits of
+    the 22 instances and output bits of the two modules, and the same value for each of their 110 parameters.
+    Croc's firmware, nine programs run in Verilator, passes on both and prints the same lines at the same
+    simulation times. Verilator 5.022 builds neither with the two `--unroll` limits of Croc's own script, so
+    both were built without them.
+- **Topwrap's examples, the same day:** five small designs whose 1685-2022 files Antmicro's Topwrap writes, tried as
+  a third tool's IP-XACT. All five are refused, four of them for what is in the files: instance names that are
+  no names (`2mux`, `4-bit counter`), a bus definition the library lacks, and a port whose width ignores its
+  parameter. They brought one change, D33. The fifth leaves an input unconnected, which D5 refuses.
 
 ## D25. A design reference's values set the design's parameters
 *2026-11-09 · active*
@@ -451,3 +480,95 @@ rounds are an adversarial AI agent attacking it.
   name.
 - **Considered:** renaming only the package and keeping the shorter subcommand `rtl`, which would break the
   organisation's pattern.
+
+## D31. A type parameter stands for the type its instance gives it
+*2026-11-10 · active*
+
+- **Decision:** a module parameter whose `dataType` is `type`, as `xactflow-sv` imports SystemVerilog's
+  `parameter type`, stands for a type. A port whose type's name is such a parameter is declared with the type
+  the instance gives it: an override, else its default, followed through a parameter that names another.
+  - `logic`, `bit` or `reg` with dimensions, such as `logic [W-1:0]`, makes the port a plain vector, whose
+    width is worked out and checked like any other.
+  - A named type has to carry its package, `pkg::req_t`, as a generated module imports nothing.
+  - Packed dimensions written in a type's name, `pkg::req_t [N-1:0]`, are read as the port's dimensions and
+    worked out. `xactflow-sv` leaves them there, where they used to go into the module with `N` unexplained.
+  - A type parameter worked out from the module's other parameters is left to the HDL, like any other (D19).
+    A keyword is no parameter's name there, so `logic [W-1:0]` counts as worked out from `W`.
+  - A design can give a type parameter a vector with its own parameters in the bounds.
+- **Why:** PULP's IPs take the types of their bus as type parameters, and the nets between them need those types.
+  Croc (D24) has them on nearly every instance. Before this each one was refused: the generated module "cannot
+  see type obi_req_t", and a default such as `logic [AddrWidth-1:0]` could not be evaluated.
+- **Considered:** leaving the type parameter's name on the net, which no module outside the IP can declare;
+  waiting for the importer to elaborate types, which it does not do by design.
+- **The limits:** a type that is neither a vector nor a named type, such as a signed vector or a struct written
+  out, is refused. So is a bound the evaluator cannot work out, such as a call of a package's function: Croc's
+  test writes `cf_math_pkg::idx_width(N)` out as its body.
+- **Revisit if:** `xactflow-sv` marks type parameters another way or starts to elaborate them, or components
+  begin to use IP-XACT's own `typeParameters`.
+
+## D32. A part select picks elements of an array of structs, and an element has members
+*2026-11-10 · active · rests on the schema*
+
+- **Decision:** on a port that is a one-dimensional packed array of a type only the compiler knows, a part select
+  with a range picks elements. `[3:3]` is one element, written `[3]`: it connects to a port of the element's type,
+  takes a constant cast to that type, and can have sub-ports, `[3].a.addr`. `[5:2]` is a run of elements, and
+  connects whole to an array of as many. What is driven is tracked for each element, so an input that is an
+  array needs every element driven, whole or member by member, and every member where the component lists them.
+- **Where the part select goes:** in a port map it is the `partSelect` of the `physicalPort`, before its
+  `subPort`s. In a design's port reference it is the reference's own `partSelect`; each `subPortReference` has
+  one of its own for the sub-port it names, which is still refused.
+- **Why:** a crossbar's ports are arrays of structs, one element for each manager or subordinate, and Croc wires
+  the members of some elements to IPs whose bus signals are separate ports. Before, any part select on a struct,
+  and any sub-port of an array, was refused.
+- **Not settled here:** whether an element of a packed dimension could also be picked with `indices`. The schema
+  allows both forms; only `range` is read, and `indices` are refused as before. The standard's text was not read
+  for this.
+- **The limits:** an array with several dimensions, a constant into a run of elements, and a part select on a
+  sub-port are refused. Members of a struct that lists none stay unchecked (D14): a member nothing drives then
+  goes unnoticed, where it is refused by name when the members are listed.
+- **Revisit if:** the standard's text says how a packed dimension of a structured port is indexed.
+
+## D33. A component with no view takes its only component instantiation
+*2026-11-10 · active · a reading to review*
+
+- **Decision:** when no view of a component instantiates anything and it has exactly one component
+  instantiation, that one gives the module's name and parameters. With several and no view, the instance is
+  refused. A view that names a component instantiation the component lacks is refused too; it used to count as
+  having none.
+- **Why:** Topwrap writes components this way: module parameters in a component instantiation, and no views.
+  Ignoring the instantiation lost its module name and parameters without a word; an override on such a
+  component was refused as reaching no module parameter, which pointed the wrong way.
+- **Considered:** keeping to the letter, where only a view brings an instantiation in. The component then says
+  nothing a generator can use, and what it does say is dropped.
+- **Revisit if:** the standard gives a view-less component a meaning.
+
+## D34. What goes into the module as it stands is checked first
+*2026-11-10 · active*
+
+- **Decision:** three things are written as the IP-XACT has them, and each now has to be what it claims.
+  - A parameter's value has to be one value: its own brackets closed, and no comma or semicolon outside them.
+  - A module parameter's name has to be an identifier, and no keyword.
+  - A port's type has to be a type's name: `pkg::t`, with `signed` or `unsigned` after it at most.
+  A percent sign in a name is doubled in the message of the compiler's check (D21), which `$error` reads as a
+  format.
+- **Why:** found by reading the code. A value `2), .OTHER(40`, a parameter called `WIDTH(3), .OTHER`, or a type
+  `pkg::t; assign x = 1; logic` came out as SystemVerilog that set or drove something else. The evaluator stopped
+  most of them, and the compilers most of the rest, but nothing here did. None can come from `xactflow-sv` or
+  `archidesc`, and none is valid IP-XACT; XactFlow does not check names against the schema.
+- **Revisit if:** XactFlow validates names and expressions itself.
+
+## D35. A port goes straight to a module port only when both number their bits alike
+*2026-11-10 · active · narrows D4*
+
+- **Decision:** a whole port wired to one of the module's own ports connects directly, with no net in between,
+  when the two have the same bounds, or when no connection takes a part of either. Otherwise the instance's port
+  keeps a net of its own and an `assign`.
+- **Why:** found by reading the code, and it was silent wrong RTL. A port connected directly goes by the module
+  port's name everywhere. A part select on it in another connection, `[3:0]`, was written with the instance's
+  numbers onto the module port's name. With a module port declared `[0:7]` or `[8:1]` that read other bits of the
+  port, and nothing complained; with `[15:8]` it read past the port, which Icarus simulates as x. It takes a
+  hierarchical component whose port has other bounds than the instance's, and a second connection on a part of
+  the same instance port. The test SoC (D13), Didactic and Croc have none, and their output did not change.
+- **Considered:** renumbering the part select for the module port, which is right too, but makes the line say
+  something the design does not.
+

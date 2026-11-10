@@ -4,6 +4,7 @@ Each is valid IP-XACT, and each once got through. Where the exporter can generat
 simulation has to show it does what the design says. Where it can't yet, it has to say so.
 """
 
+import dataclasses
 import re
 
 import ipxact
@@ -19,6 +20,7 @@ from builders import (
     bus_documents,
     component,
     design,
+    files_of,
     has_icarus,
     has_verilator,
     icarus_runs_elaboration_tasks_in_generate_blocks,
@@ -27,7 +29,9 @@ from builders import (
     interconnection,
     library_of,
     logical,
+    passes,
     port_map,
+    refused,
     simulate,
     slang_errors,
     struct,
@@ -85,30 +89,6 @@ def far_side():
 
 
 FAR_SIDE = "module far_side (output logic flag_o); assign flag_o = 1'b1; endmodule\n"
-
-
-def files_of(the_design, documents, configuration=None, buses=None, **options):
-    library = library_of([*(bus_documents() if buses is None else buses), *documents, the_design])
-    return generate_files(link(the_design, library, configuration), **options)
-
-
-def passes(tmp_path, the_design, documents, source, module="soc", drive=None, expect=None, configuration=None, buses=None, packages="", lint=True):
-    """Compiles without complaint in all three tools, and passes a simulation. `packages` are compiled first."""
-    files = files_of(the_design, documents, configuration, buses)
-    tools_see = {**files, "ip_types_pkg.sv": packages} if packages else files
-    ordered = [text for _, text in sorted(tools_see.items(), key=lambda item: not item[0].endswith("_pkg.sv"))]
-    assert slang_errors(*ordered, source) == []
-    if has_verilator and lint:
-        result = verilator_lint(tmp_path, tools_see, [source], module)
-        assert result.returncode == 0, result.stderr
-    if has_icarus:
-        assert "PASS" in simulate(tmp_path, tools_see, [source], bench(module, drive or {}, expect or {}))
-    return files
-
-
-def refused(match, the_design, documents, configuration=None, buses=None, **options):
-    with pytest.raises(ValueError, match=match):
-        files_of(the_design, documents, configuration, buses, **options)
 
 
 def bus_of(name, instances, **options):
@@ -1913,3 +1893,97 @@ def test_a_port_wider_than_its_logical_port_with_no_range_is_refused():
 def test_a_logical_range_past_the_abstractions_width_is_refused():
     soc = design("soc", [instance("m", "sender"), instance("s", "high")], [interconnection("l", ("m", "b"), ("s", "b"))])
     refused(r"logical range \[11:8\] of 'WORD' on s\.data_i goes past its width in the abstraction, 8 bits \(SCR 6\.19\)", soc, [sender(), word_end("high", "target", "in", 4, (11, 8))])
+
+
+# --- found by reading the code, 2026-11-10
+
+
+CODED = """
+module coded (output logic [7:0] data_o); assign data_o = 8'b1100_1010; endmodule
+module one_bit (input logic x_i, output logic seen_o); assign seen_o = x_i; endmodule
+"""
+
+
+@pytest.mark.parametrize(
+    "module_port, select, expected",
+    [((7, 0), (0, 0), 0), ((0, 7), (0, 0), 0), ((0, 7), (7, 7), 1), ((8, 1), (1, 1), 1), ((8, 1), (4, 4), 0), ((15, 8), (3, 3), 1)],
+)
+def test_a_part_select_means_the_instances_bits_when_its_port_also_goes_whole_to_a_module_port(tmp_path, module_port, select, expected):
+    """A whole port wired to a module port used to go by the module port's name everywhere. With other bounds
+    there, `[0:7]` or `[8:1]`, a part select written for the instance's port then read other bits of it, and
+    nothing complained."""
+    chip = hierarchical("chip", "chip_d", [wire("data_o", "out", vectors=[module_port]), wire("seen_o", "out")])
+    chip_d = design(
+        "chip_d",
+        [instance("m", "coded"), instance("n", "one_bit")],
+        ad_hocs=[ad_hoc("whole", ("m", "data_o"), external=["data_o"]), ad_hoc("part", ("m", "data_o", select), ("n", "x_i")), ad_hoc("seen", ("n", "seen_o"), external=["seen_o"])],
+    )
+    documents = [chip, component("coded", [wire("data_o", "out", 8)]), component("one_bit", [wire("x_i", "in"), wire("seen_o", "out")])]
+    descending = module_port[0] > module_port[1]  # Verilator's lint warns about a vector declared [0:7]
+    passes(tmp_path, chip_d, documents, CODED, module="chip", expect={"data_o": (8, 0xCA), "seen_o": (1, expected)}, lint=descending)
+
+
+def test_a_port_still_goes_straight_to_a_module_port_with_the_same_bounds():
+    chip = hierarchical("chip", "chip_d", [wire("data_o", "out", 8)])
+    chip_d = design("chip_d", [instance("m", "coded")], ad_hocs=[ad_hoc("whole", ("m", "data_o"), external=["data_o"])])
+    text = files_of(chip_d, [chip, component("coded", [wire("data_o", "out", 8)])])["chip.sv"]
+    assert ".data_o (data_o)" in text and "assign" not in text
+
+
+@pytest.mark.parametrize("value", ["2), .OTHER(40", "pkg::f(1), 2", "(1", "1; 2"])
+def test_a_parameter_value_that_would_not_stay_in_its_brackets_is_refused(value):
+    sized = component("sized", [wire("data_o", "out", 8)], parameters={"WIDTH": 8, "OTHER": 1})
+    refused("is not one value", design("soc", [instance("s", "sized", WIDTH=value)]), [sized])
+
+
+def test_a_parameter_value_may_have_commas_inside_its_own_brackets():
+    sized = component("sized", [wire("data_o", "out", 8)], parameters={"WIDTH": 8})
+    text = files_of(design("soc", [instance("s", "sized", WIDTH="'{pkg::A, pkg::f(1, 2)}")]), [sized])["soc.sv"]
+    assert ".WIDTH('{pkg::A, pkg::f(1, 2)})" in text
+
+
+@pytest.mark.parametrize("name, message", [("WIDTH(3), .OTHER", "is not a valid SystemVerilog identifier"), ("begin", "is a SystemVerilog keyword")])
+def test_a_module_parameter_whose_name_is_no_identifier_is_refused(name, message):
+    sized = component("sized", [wire("data_o", "out", 8)], parameters={"WIDTH": 8})
+    sized.model.component_instantiations[0].module_parameters[0].name = name
+    refused(message, design("soc", [instance("s", "sized")]), [sized])
+
+
+@pytest.mark.parametrize("type_name", ["pkg::t; assign s_data_o = 1; logic", "pkg::t /* x */", "struct packed { logic a; }"])
+def test_a_type_name_that_is_more_than_a_types_name_is_refused(type_name):
+    typed = component("typed", [wire("data_o", "out", 8, type_name=type_name)])
+    refused("is not a type this version can declare", design("soc", [instance("s", "typed")]), [typed])
+
+
+def test_a_view_that_names_a_component_instantiation_the_component_lacks_is_refused():
+    broken = component("sized", [wire("data_o", "out", 8)], parameters={"WIDTH": 8})
+    broken.model.views[0].component_instantiation_ref = "elsewhere"
+    with pytest.raises(ValueError, match="missing component instantiation|link errors"):
+        files_of(design("soc", [instance("s", "sized")]), [broken])
+
+
+def test_a_percent_sign_in_a_name_is_doubled_in_the_compilers_message():
+    """$error reads its message as a format, and the message names the connection."""
+    documents = [component("moder", [wire("mode_i", "in", type_name="mode_pkg::mode_e")])]
+    soc = design("soc", [instance("u", "moder")], ad_hocs=[ad_hoc("at_50%", ("u", "mode_i"), tied="2")])
+    assert "ad hoc connection 'at_50%%'" in files_of(soc, documents)["soc.sv"]
+
+
+# --- D33: a component with no view takes its only component instantiation
+
+
+def viewless(instantiations):
+    sized = component("sized", [wire("data_o", "out", "WIDTH-1")], parameters={"WIDTH": 8}, module="sized_rtl")
+    sized.model.views = []
+    sized.model.component_instantiations = [dataclasses.replace(sized.model.component_instantiations[0], name=name) for name in instantiations]
+    return sized
+
+
+def test_a_component_with_no_view_takes_its_only_component_instantiation(tmp_path):
+    source = "module sized_rtl #(parameter int WIDTH = 8) (output logic [WIDTH-1:0] data_o); assign data_o = '1; endmodule\n"
+    text = passes(tmp_path, design("soc", [instance("s", "sized", WIDTH=4)]), [viewless(["rtl"])], source, expect={"s_data_o": (4, 0xF)})["soc.sv"]
+    assert "sized_rtl #(" in text and ".WIDTH(4)" in text
+
+
+def test_a_component_with_no_view_and_several_component_instantiations_is_refused():
+    refused("has no view to choose between its component instantiations: rtl, gate", design("soc", [instance("s", "sized")]), [viewless(["rtl", "gate"])])
