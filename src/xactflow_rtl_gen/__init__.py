@@ -6,9 +6,9 @@ from typing import List, Optional, Sequence, Union
 import ipxact
 from xactflow import Exporter, Library, LinkedDesign, link
 
-from .top_writer import GENERATED_MARKER, generate_files, generate_top
+from .top_writer import GENERATED_MARKER, file_list, generate_files, generate_top
 
-__all__ = ["RtlExporter", "__version__", "generate_files", "generate_top"]
+__all__ = ["RtlExporter", "__version__", "file_list", "generate_files", "generate_top"]
 
 
 def _names(value: Union[str, Sequence[str]]) -> List[str]:
@@ -32,6 +32,11 @@ class RtlExporter(Exporter):
               comma-separated string or a list.
       top:    the VLNV of the hierarchical component to take the module's name and ports from.
               Needed only when more than one component holds the design.
+      unconnected: what to do with a port the design connects to nothing, in a module whose ports a
+              component defines: an instance's input, or an output of the module. `refuse`, the
+              default, or `open`, which leaves it as the design has it.
+      filelist: the name of a file to write next to the modules, listing what was generated in an
+              order that compiles, for a compiler's -F.
     """
 
     name = "rtl-gen"
@@ -40,10 +45,18 @@ class RtlExporter(Exporter):
         common = _names(options.pop("common", ()))
         lib = options.pop("lib", None)
         top = options.pop("top", None)
+        unconnected = options.pop("unconnected", "refuse")
+        filelist = options.pop("filelist", None)
         if options:
             raise TypeError(f"xactflow-rtl-gen got unknown options: {', '.join(sorted(options))}")
+        if filelist is not None and (not isinstance(filelist, str) or not filelist.strip() or Path(filelist).name != filelist):
+            raise TypeError(f"xactflow-rtl-gen: the filelist option is a file name in the output folder, got {filelist!r}")
 
-        files = generate_files(self._linked(subject, lib), common, top)
+        files = generate_files(self._linked(subject, lib), common, top, unconnected)
+        if filelist is not None:
+            if filelist in files:
+                raise ValueError(f"the file list cannot be called {filelist}: a generated module has that file")
+            files[filelist] = file_list(files)
 
         output_dir = Path(output_dir)
         for name in files:  # before writing anything, so a refusal leaves no partial output

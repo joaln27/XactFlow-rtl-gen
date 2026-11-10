@@ -15,6 +15,7 @@ from builders import (
     bus_documents,
     component,
     design,
+    files_of,
     generate,
     hierarchical,
     instance,
@@ -22,6 +23,7 @@ from builders import (
     library_of,
     logical,
     port_map,
+    slang_errors,
     wire,
 )
 from test_scenarios import replier, sender, seer
@@ -163,14 +165,69 @@ def test_hier_interface_the_component_lacks_is_refused():
         generate(design("chip_d", [instance("s", "replier")], [connection]), [hierarchical("chip", "chip_d", IO), replier()])
 
 
-def test_module_parameters_on_the_top_component_are_refused():
+def test_module_parameters_of_the_top_component_become_the_modules_own():
+    """More of it in test_module_parameters.py (D36)."""
     top = hierarchical("chip", "chip_d", IO)
     top.model.views[0].component_instantiation_ref = "named"
     top.model.component_instantiations = [
         ipxact.ComponentInstantiation(name="named", module_parameters=[ipxact.ModuleParameter(name="W", value=ipxact.Expression("8"))])
     ]
-    with pytest.raises(ValueError, match="module parameters on the top component are not supported yet"):
-        generate(design("chip_d", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])
+    text = generate(design("chip_d", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])["chip.sv"]
+    assert "module chip #(\n    parameter W = 8\n) (" in text and "if (W !== 8) begin : W_as_generated" in text
+
+
+def test_an_unconnected_input_is_left_open_when_asked(tmp_path):
+    """D38. The instance says so where the port is, and nothing else changes."""
+    the_design = design("chip_d", [instance("s", "replier")], ad_hocs=[ad_hoc("b", ("s", "reply_o"), external=["out_o"])])
+    documents = [hierarchical("chip", "chip_d", IO), replier()]
+    text = files_of(the_design, documents, unconnected="open")["chip.sv"]
+    assert re.search(r"\.data_i +\(\),?  // nothing in the design connects this input: left open \(unconnected=open\)", text)
+    assert ".reply_o (out_o)" in text
+    # It compiles, and a linter still points at the input.
+    source = "module replier (input logic [7:0] data_i, output logic [7:0] reply_o); assign reply_o = ~data_i; endmodule\n"
+    assert slang_errors(text, source) == ["DiagCode(EmptyInputPortConn)"]
+    with pytest.raises(TypeError, match="the unconnected option is one of refuse, open, got 'float'"):
+        files_of(the_design, documents, unconnected="float")
+
+
+def test_an_output_of_the_module_nothing_drives_is_left_undriven_when_asked():
+    the_design = design("chip_d", [instance("s", "replier")], ad_hocs=[ad_hoc("a", ("s", "data_i"), external=["in_i"])])
+    documents = [hierarchical("chip", "chip_d", IO), replier()]
+    with pytest.raises(ValueError, match=r"chip\.out_o: top-level output bits \[0, 1, 2, 3, 4, 5, 6, 7\] have no driver"):
+        files_of(the_design, documents)
+    text = files_of(the_design, documents, unconnected="open")["chip.sv"]
+    assert "    // out_o: nothing in the design drives this output: left undriven (unconnected=open)\n" in text
+    source = "module replier (input logic [7:0] data_i, output logic [7:0] reply_o); assign reply_o = ~data_i; endmodule\n"
+    assert slang_errors(text, source) == []
+    # Driven in part is a mistake in the design, whatever the option says.
+    reply = ad_hoc("b", ("s", "reply_o", (3, 0)), external=[("out_o", (3, 0))])
+    in_part = design("chip_d", [instance("s", "replier")], ad_hocs=[ad_hoc("a", ("s", "data_i"), external=["in_i"]), reply])
+    with pytest.raises(ValueError, match=r"top-level output bits \[4, 5, 6, 7\] have no driver"):
+        files_of(in_part, documents, unconnected="open")
+
+
+def test_leaving_inputs_open_reaches_the_modules_inside_and_no_further():
+    inner = hierarchical("inner", "inner_d", [wire("out_o", "out", 8)])
+    inner_d = design("inner_d", [instance("s", "replier")], ad_hocs=[ad_hoc("b", ("s", "reply_o"), external=["out_o"])])
+    outer_d = design("chip_d", [instance("i", "inner")], ad_hocs=[ad_hoc("b", ("i", "out_o"), external=["out_o"])])
+    documents = [hierarchical("chip", "chip_d", IO), inner, inner_d, replier()]
+    with pytest.raises(ValueError, match=r"s\.data_i is not connected.*or leave every such input open with the option unconnected=open"):
+        files_of(outer_d, documents)
+    files = files_of(outer_d, documents, unconnected="open")
+    assert "left open (unconnected=open)" in files["inner.sv"] and "left open" not in files["chip.sv"]
+    # Without a component to define the ports, an input nothing connects still becomes a port of the module.
+    alone = files_of(design("soc", [instance("s", "replier")]), [replier()], unconnected="open")["soc.sv"]
+    assert "input  logic [7:0] s_data_i" in alone and "left open" not in alone
+
+
+def test_an_input_connected_in_part_is_still_refused_when_inputs_may_be_left_open():
+    the_design = design(
+        "chip_d",
+        [instance("s", "replier")],
+        ad_hocs=[ad_hoc("a", ("s", "data_i", (3, 0)), external=[("in_i", (3, 0))]), ad_hoc("b", ("s", "reply_o"), external=["out_o"])],
+    )
+    with pytest.raises(ValueError, match=r"s\.data_i: bits \[4, 5, 6, 7\] are not driven by any connection"):
+        files_of(the_design, [hierarchical("chip", "chip_d", IO), replier()], unconnected="open")
 
 
 def test_two_components_holding_the_design_need_the_top_option():

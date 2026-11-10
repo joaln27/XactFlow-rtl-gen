@@ -1,10 +1,25 @@
 """The address map package, and an address actually decoded through a generated module."""
 
+import ipxact
 import pytest
 from xactflow import link
 from xactflow_archidesc import Design
 
-from builders import bus, bus_documents, component, has_icarus, has_verilator, library_of, port_map, simulate, slang_errors, verilator_lint, wire
+from builders import (
+    VENDOR,
+    bus,
+    bus_documents,
+    component,
+    has_icarus,
+    has_verilator,
+    library_of,
+    port_map,
+    simulate,
+    slang_errors,
+    verilator_lint,
+    vlnv_ref,
+    wire,
+)
 from xactflow_rtl_gen import generate_files
 
 # A decoder written the way the rule table is meant to be used: it takes the table as a parameter.
@@ -83,6 +98,16 @@ def soc(windows=(("m1", "second", 0x4000_1000, 0x2000), ("m0", "first", 0x4000_0
         targets.setdefault(target, design.add_ip(target, "test.org:ip:chosen:1.0"))
         design.connect_bus(dec.bus(interface), targets[target], base_addr=base, size=size)
     return link(design.build(), library)
+
+
+def test_a_rule_table_cannot_go_to_a_module_generated_here():
+    """A decoder whose view holds a design gets a generated module, which takes one value of each parameter (D36)."""
+    hierarchical = decoder()
+    hierarchical.model.views[0].design_instantiation_ref = "d"
+    hierarchical.model.design_instantiations = [ipxact.DesignInstantiation(name="d", design_ref=vlnv_ref("design", "decoder_d"))]
+    inside = ipxact.Design(vlnv=ipxact.VLNV(VENDOR, "design", "decoder_d", "1.0"))
+    with pytest.raises(ValueError, match="instance 'dec': its module is generated here, so it cannot be given the address map's rule table"):
+        generate_files(soc(documents=[hierarchical, chosen(), inside]))
 
 
 def test_package_holds_a_table_for_each_decoder():

@@ -8,7 +8,9 @@ which needs somewhere to collect its bits, and an inout, which can only share a 
 
 The module's own ports come from the hierarchical component whose view holds the design, when
 the library has one. Without one, a port no connection reaches becomes a top-level port, so
-nothing floats silently.
+nothing floats silently. That component's module parameters become the module's own, each with
+the one value the module is generated for: every width and value inside is a number worked out
+here, and the compiler is given a check that refuses another value.
 
 Anything this version cannot generate correctly raises ValueError instead of writing wrong RTL.
 """
@@ -58,11 +60,17 @@ _TYPE = re.compile(
 _NAMED_TYPE = re.compile(r"[A-Za-z_][\w$]*(?:::[A-Za-z_][\w$]*)*(?:\s+(?:un)?signed)?")  # a typedef, or int unsigned
 _BIT_VECTOR = re.compile(r"(?:logic|bit|reg)(?:\s+unsigned)?\s*(?:\[[^\[\]]*\]\s*)*")
 _DIMENSION = re.compile(r"\[([^\[\]]*)\]")
+# The type of a module parameter: a vector with its dimensions, or one of these, or a typedef named with its package.
+_VECTOR_TYPE = re.compile(r"(?P<base>(?:logic|bit|reg)(?:\s+(?:un)?signed)?)\s*(?P<dimensions>(?:\[[^\[\]]*\]\s*)+)")
+_NOT_INTEGRAL = {"real", "shortreal", "realtime", "string"}
+_PARAMETER_TYPES = {"logic", "bit", "reg", *_SIZED_TYPES, *_NOT_INTEGRAL}
 
 _IN = ipxact.Direction.IN
 _OUT = ipxact.Direction.OUT
 _INOUT = ipxact.Direction.INOUT
 _ABSTRACTION_DEFAULT = "abstraction default"
+_LEFT_OPEN = "nothing in the design connects this input: left open (unconnected=open)"
+_UNDRIVEN = "nothing in the design drives this output: left undriven (unconnected=open)"
 _FROM_INSIDE = {_IN: _OUT, _OUT: _IN, _INOUT: _INOUT}  # a module's input drives what is inside it
 
 _Resolver = Callable[[str], object]
@@ -420,6 +428,7 @@ class _Port:
     unpacked: Set[str] = field(default_factory=set)  # paths of unpacked structs, "" likewise
     unsupported: Optional[str] = None  # why nothing can connect to it: it can only be left open
     element: Optional[str] = None  # the type of one element, when the port is a one-dimensional array of a type (D32)
+    note: str = ""  # said next to the port where its instance is written
 
     @property
     def label(self) -> str:
@@ -554,8 +563,30 @@ def _check_linked(linked: LinkedDesign) -> None:
             raise ValueError(f"ad hoc connection {connection.name!r} refers to unknown ports: {', '.join(missing)}")
 
 
+@dataclass
+class _Held:
+    """What a view holds: a design, the design configuration it names if any, and the values its references
+    give the parameters of each."""
+
+    design: ipxact.Design
+    configuration: Optional[ipxact.DesignConfiguration]
+    design_values: Dict[str, object]
+    configuration_values: Dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
+class _Declared:
+    """A parameter of the module being written, with the one value the module is generated for (D36)."""
+
+    type_name: str  # as SystemVerilog, or nothing for a parameter that takes its type from its value
+    name: str
+    value: str
+    differs: str  # the operator that tells another value from this one
+
+
 def _refuse_override_on(reference: Optional[ipxact.VLNVRef], where: str) -> None:
-    """Parameter overrides on a reference to a design or a bus would be lost: nothing here applies them."""
+    """Parameter overrides on a reference to a bus, or from a design configuration to its design, would be
+    lost: nothing here applies them."""
     if reference is not None and reference.config_element_values:
         names = ", ".join(sorted(reference.config_element_values))
         raise ValueError(f"{where}: parameter overrides on its reference to {reference.vlnv} are not supported yet: {names}")
@@ -595,12 +626,11 @@ def _component_instantiation(
     raise ValueError(f"{where}: view {view.name!r} of {component.vlnv} refers to a missing component instantiation, {view.component_instantiation_ref!r}")
 
 
-def _design_of_view(
-    library: Library, component: ipxact.Component, view: Optional[ipxact.View], where: str
-) -> Optional[Tuple[ipxact.Design, Optional[ipxact.DesignConfiguration], Dict[str, object]]]:
-    """The design a view holds, directly or through a design configuration, if it holds one, and the values
-    its reference to the design gives the design's parameters (D25). A view may name both a design and a
-    design configuration; the values are then on the design's reference, which is why it is read either way."""
+def _design_of_view(library: Library, component: ipxact.Component, view: Optional[ipxact.View], where: str) -> Optional[_Held]:
+    """The design a view holds, directly or through a design configuration, if it holds one, with the values
+    its reference to the design gives the design's parameters (D25), and those its reference to the design
+    configuration gives that one's (D37). A view may name both a design and a design configuration; the
+    design's values are then on the design's reference, which is why it is read either way."""
     if view is None:
         return None
     model = component.model
@@ -617,7 +647,6 @@ def _design_of_view(
         )
         if instantiation is None:
             raise ValueError(f"{where}: view {view.name!r} refers to a missing design configuration instantiation")
-        _refuse_override_on(instantiation.design_configuration_ref, where)
         configuration = library.get_design_configuration(instantiation.design_configuration_ref.vlnv)
         if configuration is None or configuration.design_ref is None:
             raise ValueError(f"{where}: design configuration {instantiation.design_configuration_ref} is not usable")
@@ -629,12 +658,12 @@ def _design_of_view(
         design = library.get_design(configuration.design_ref.vlnv)
         if design is None:
             raise ValueError(f"{where}: design {configuration.design_ref} is not in the library")
-        return design, configuration, values
+        return _Held(design, configuration, values, dict(instantiation.design_configuration_ref.config_element_values))
     if direct is not None:
         design = library.get_design(direct.design_ref.vlnv)
         if design is None:
             raise ValueError(f"{where}: design {direct.design_ref} is not in the library")
-        return design, None, values
+        return _Held(design, None, values)
     return None
 
 
@@ -736,11 +765,17 @@ def _instance_parameters(
     overrides: Dict[str, str],
     resolve: _Resolver,
     given: Dict[str, str],
+    every_one: bool = False,
+    reaching: bool = True,
 ) -> List[Tuple[str, str]]:
     """The #(...) of an instance: every module parameter of its view, with its value in this design.
     The HDL's own default can differ from the component's value, so none is left to it, except one the
     HDL derives from the others (D19 in docs/decisions.md). link() does not apply overrides, so they are
-    applied here. `given` holds values that are already final."""
+    applied here. `given` holds values that are already final.
+
+    `every_one` is for the module being generated, which has no HDL to derive anything: it declares each
+    parameter with its value (D36). `reaching` is whether every override has to reach a module parameter; on
+    an instance whose module is generated here, an override may change only what is inside it."""
     module_parameters = instantiation.module_parameters if instantiation is not None else []
     module_names = {p.name for p in module_parameters}
     result = []
@@ -755,7 +790,7 @@ def _instance_parameters(
                 raise ValueError(f"{where}: {parameter.name} is a runtime parameter, so an override cannot reach it")
             continue
         identities = {n for n in (parameter.parameter_id, text.strip()) if n}
-        if not identities & set(overrides) and _derived_in_the_hdl(text, resolve, module_names):
+        if not every_one and not identities & set(overrides) and _derived_in_the_hdl(text, resolve, module_names):
             _check_bounds_of(parameter, resolve, f"{where}: module parameter {parameter.name}")
             continue
         # An override replaces a parameter's value in `resolve`, which keeps that parameter's type. Going
@@ -775,6 +810,8 @@ def _instance_parameters(
             except (OverflowError, ValueError, MemoryError, RecursionError) as exc:
                 raise ValueError(f"{label}: not a usable number: {exc}") from exc
         result.append((parameter.name, written or _resolved_text(value, resolve, label, own=parameter.name)))
+    if not reaching:
+        return result
 
     # An override that reaches no module parameter would not change the hardware.
     def uses(p: ipxact.Parameter) -> str:
@@ -877,6 +914,35 @@ def _type_in_this_instance(
     else:
         base, bounds = inner.group("base"), _bounds_in(inner.group("dimensions"), resolve, f"{where}: type parameter {name}")
     return base, [*own, *bounds]
+
+
+def _parameter_type(parameter: ipxact.ModuleParameter, resolve: _Resolver, where: str) -> str:
+    """The type the generated module declares one of its parameters with: the `dataType` an importer copied
+    from the HDL, with the bounds of a vector worked out. With none the parameter takes its type from its
+    value, which is written at the width and sign its IP-XACT type gives it (D11)."""
+    data_type = " ".join((parameter.data_type or "").split())
+    if not data_type:
+        return ""
+    if data_type == "type":
+        raise ValueError(f"{where}: a type parameter on a generated module is not supported yet")
+    vector = _VECTOR_TYPE.fullmatch(data_type)
+    if vector is not None:
+        bounds = _bounds_in(vector.group("dimensions"), resolve, where)
+        return vector.group("base") + " " + "".join(f"[{left}:{right}]" for left, right in bounds)
+    if not _NAMED_TYPE.fullmatch(data_type):
+        raise ValueError(f"{where}: {data_type!r} is not a type this version can declare")
+    if data_type.split()[0] not in _PARAMETER_TYPES and "::" not in data_type:
+        raise ValueError(f"{where}: the generated module cannot see type {data_type}, which needs its package in its name")
+    return data_type
+
+
+def _differs(type_name: str, value: str) -> str:
+    """The operator that tells another value from this one. `!==` tells x and z apart too, where `!=` would
+    not know and so let any value through, but it takes no real number and no string."""
+    kinds = {token.lastgroup for token in _TOKEN.finditer(value)}
+    if (type_name.split() or [""])[0] in _NOT_INTEGRAL or kinds & {"string", "real"}:
+        return "!="
+    return "!=="
 
 
 @dataclass
@@ -1094,19 +1160,31 @@ class _ModuleBuilder:
         design_values: Optional[Dict[str, object]] = None,
         module_name: Optional[str] = None,
         variants: Optional[Dict[Tuple[object, ...], str]] = None,
+        configuration_values: Optional[Dict[str, object]] = None,
+        leave_open: bool = False,
     ) -> None:
         self.linked = linked
         self.common = list(common)
         self.top_component = top_component
-        self.top_view = top_view
         self.must_use_common = must_use_common
         self.module_name = module_name
         self.variants = variants if variants is not None else {}
+        self.leave_open = leave_open  # whether a port the design connects to nothing stays so, where it would be refused (D38)
         where = f"top component {top_component.vlnv}" if top_component else f"design {linked.vlnv}"
-        # The component's parameters, with the values of the instance this module is generated for (D26).
+        # The view that holds the design, and the module it describes, if it does.
+        self.top_view = self.top_instantiation = None
+        if top_component is not None:
+            self.top_view = top_view or _view_holding_design(linked.library, top_component, linked.vlnv)
+            if self.top_view is not None:
+                self.top_instantiation = _component_instantiation(top_component, self.top_view, where)
+        # The component's parameters, with the values of the instance this module is generated for (D26). Its
+        # ports and module parameters see those of its component instantiation as well, as an instance's do.
         component_parameters = list(top_component.parameters) if top_component else []
+        of_the_module = [*self.top_instantiation.parameters, *self.top_instantiation.module_parameters] if self.top_instantiation else []
         top_overrides = top_overrides or {}
-        _check_overrides_name_parameters(top_overrides, component_parameters, where, "the component")
+        _check_overrides_name_parameters(top_overrides, [*component_parameters, *of_the_module], where, "the component")
+        self.top_parameters = [*component_parameters, *of_the_module]
+        self.top_resolve = _resolver(self.top_parameters, top_overrides)
         component_parameters = [_overridden(p, top_overrides) for p in component_parameters]
         self.top_overrides = top_overrides
         self.component_resolve = _resolver(component_parameters, {})
@@ -1122,9 +1200,21 @@ class _ModuleBuilder:
         # What an expression written in the design can see: the design's parameters first.
         scope = _nearest_first([_overridden(p, values) for p in design_parameters], component_parameters)
         self.design_resolve = _resolver(scope, {})
-        # A value in a design configuration sees that configuration's parameters before those.
+        # A value in a design configuration sees that configuration's parameters before those. The component's
+        # reference to the configuration gives them values the same way as the design's (D37).
         configuration = linked.design_configuration
-        self.configuration_resolve = _resolver(_nearest_first(configuration.parameters if configuration else [], scope), {})
+        configuration_parameters = list(configuration.parameters) if configuration else []
+        _check_overrides_name_parameters(
+            configuration_values or {}, configuration_parameters, f"{where}: its reference to the design configuration", "that design configuration"
+        )
+        names = {p.parameter_id: p.name for p in configuration_parameters}
+        values = {
+            key: _resolved_text(_text(value), self.component_resolve, f"{where}: the value for design configuration parameter {names[key]}")
+            for key, value in (configuration_values or {}).items()
+        }
+        self.configuration_resolve = _resolver(_nearest_first([_overridden(p, values) for p in configuration_parameters], scope), {})
+        self.declared: List[_Declared] = []  # the module's own parameters (D36)
+        self.undriven: List[str] = []  # the module's outputs that nothing drives, where that is allowed (D38)
         self.net_owners: Dict[str, List[_Port]] = {}  # who holds each net's name, in case it has to change
         self.instances: Dict[str, _Instance] = {}
         self.children: List[_Child] = []
@@ -1158,9 +1248,14 @@ class _ModuleBuilder:
         """Instances, nets and the module's ports share one scope in SystemVerilog. A port can claim a name
         after a net got it, as both come from names joined up. The net is the one that can change."""
         ports = set(self.top.ports)
+        parameters = {parameter.name for parameter in self.declared}
+        for name in sorted(ports & parameters):
+            raise ValueError(f"module {self.module} has a port and a module parameter both called {name!r}")
         for name in sorted(ports & set(self.instances)):
             raise ValueError(f"instance {name!r} has the name of a port of module {self.module}")
-        for name in sorted(ports & set(self.wires)):
+        for name in sorted(parameters & set(self.instances)):
+            raise ValueError(f"instance {name!r} has the name of a parameter of module {self.module}")
+        for name in sorted((ports | parameters) & set(self.wires)):
             new_name = self._free_net_name(name)
             self.wires[new_name] = self.wires.pop(name)
             for port in self.net_owners.get(name, []):
@@ -1177,18 +1272,16 @@ class _ModuleBuilder:
         if component is None:
             return
         where = f"top component {component.vlnv}"
-        view = self.top_view or _view_holding_design(self.linked.library, component, self.linked.vlnv)
-        instantiation = _component_instantiation(component, view, where) if view is not None else None
-        if instantiation is not None and instantiation.module_parameters:
-            raise ValueError(f"{where}: module parameters on the top component are not supported yet")
+        view, instantiation = self.top_view, self.top_instantiation
         self.module = instantiation.module_name if instantiation is not None and instantiation.module_name else component.vlnv.name
         if self.module_name:  # the version of it for one set of parameter values (D26)
             self.module = self.module_name
         _check_identifier(self.module, f"{where}: module name")
         self.top.name = self.top.module = self.module
         self.top.view = view
-        resolve = self.component_resolve
+        resolve = self.top_resolve
         self.top.resolve = resolve
+        self._declare_parameters(where)
         for port in component.model.ports:
             built = _build_port(self.module, port, resolve, is_top=True, view=view)
             if built is None:
@@ -1196,6 +1289,27 @@ class _ModuleBuilder:
             else:
                 _check_type_is_visible(built)
                 self.top.ports[port.name] = built
+
+    def _declare_parameters(self, where: str) -> None:
+        """The module parameters of the component this module is generated from become the module's own, each
+        with the one value the module is generated for, so that what instantiates it by hand still compiles.
+        Everything inside is worked out for those values, so the compiler is given a check that refuses any
+        other (D36)."""
+        instantiation = self.top_instantiation
+        if instantiation is None:
+            return
+        by_name = {parameter.name: parameter for parameter in instantiation.module_parameters}
+        values = _instance_parameters(
+            where, self.top_parameters, instantiation, self.top_overrides, self.top_resolve, {}, every_one=True, reaching=False
+        )
+        for name, value in values:
+            label = f"{where}: module parameter {name}"
+            type_name = _parameter_type(by_name[name], self.top_resolve, label)
+            if "'{" in value:
+                raise ValueError(f"{label}: the value {value!r} cannot be compared with another, so the module cannot check it is given this one")
+            if any(name == other.name for other in self.declared):
+                raise ValueError(f"{label}: the component has two module parameters of that name")
+            self.declared.append(_Declared(type_name, name, value, _differs(type_name, value)))
 
     def _add_instance(self, linked_instance) -> None:
         name = linked_instance.instance_name
@@ -1225,11 +1339,14 @@ class _ModuleBuilder:
 
         design = _design_of_view(library, component, view, where)
         if design is not None:
+            if "ADDR_RULES" in given:
+                # Its module is generated for one value of each parameter (D36), and would refuse the table.
+                raise ValueError(f"{where}: its module is generated here, so it cannot be given the address map's rule table as a parameter")
             version = self._module_for_values(component, view, module, overrides, where)
             if version == module:  # values that change nothing: the module as it is
-                self.children.append(_Child(component, design[0], design[1], view))
+                self.children.append(_Child(component, design.design, design.configuration, view))
             else:
-                self.children.append(_Child(component, design[0], design[1], view, overrides, version))
+                self.children.append(_Child(component, design.design, design.configuration, view, overrides, version))
                 module = version
 
         ports: Dict[str, _Port] = {}
@@ -1245,8 +1362,9 @@ class _ModuleBuilder:
         self.instances[name] = _Instance(
             name,
             module,
-            # A hierarchical instance's values go into the module generated for it, not on the instance.
-            _instance_parameters(where, parameters, instantiation, {} if design is not None else overrides, resolve, given),
+            # A hierarchical instance's values go into the module generated for it, which declares these
+            # parameters with the same values (D36), so here they only have to agree with it.
+            _instance_parameters(where, parameters, instantiation, overrides, resolve, given, reaching=design is None),
             ports,
             skipped,
             resolve,
@@ -1262,13 +1380,16 @@ class _ModuleBuilder:
     def _module_for_values(
         self, component: ipxact.Component, view: Optional[ipxact.View], base: str, overrides: Dict[str, str], where: str
     ) -> str:
-        """The module a hierarchical instance needs (D26). The generated modules take no parameters, as every
-        value in them is worked out, so a set of values that changes any parameter gets a module of its own:
-        `<module>_1`, `<module>_2`, ... in the order they turn up. Values that change nothing keep the module."""
+        """The module a hierarchical instance needs (D26). Every value in a generated module is worked out, and
+        a parameter it declares only takes the value it is generated for (D36), so a set of values that changes
+        any parameter gets a module of its own: `<module>_1`, `<module>_2`, ... in the order they turn up. Values
+        that change nothing keep the module."""
         if not overrides:
             return base
-        _check_overrides_name_parameters(overrides, component.parameters, where, f"{component.vlnv}")
-        before, after = _resolver(component.parameters, {}), _resolver(component.parameters, overrides)
+        instantiation = _component_instantiation(component, view, where)
+        parameters = [*component.parameters, *(instantiation.parameters if instantiation else []), *(instantiation.module_parameters if instantiation else [])]
+        _check_overrides_name_parameters(overrides, parameters, where, f"{component.vlnv}")
+        before, after = _resolver(parameters, {}), _resolver(parameters, overrides)
 
         def value(parameter: ipxact.Parameter, resolve: _Resolver) -> str:
             final = resolve(parameter.parameter_id) if parameter.parameter_id else parameter
@@ -1277,8 +1398,8 @@ class _ModuleBuilder:
             except (ExpressionError, ValueError, OverflowError, MemoryError, RecursionError):
                 return _resolved_text(_text(final.value), resolve, f"{where}: parameter {parameter.name}", keep_unknown=True)
 
-        values = tuple((p.name, value(p, after)) for p in component.parameters)
-        if values == tuple((p.name, value(p, before)) for p in component.parameters):
+        values = tuple((p.name, value(p, after)) for p in parameters)
+        if values == tuple((p.name, value(p, before)) for p in parameters):
             return base
         key = (str(component.vlnv), view.name if view is not None else None, values)
         if key not in self.variants:
@@ -1960,9 +2081,19 @@ class _ModuleBuilder:
     def _free_net_name(self, wanted: str) -> str:
         """A net's name is ours to choose, so one that is taken or a keyword just changes."""
         name, tries = wanted, 1
-        while name in self.wires or name in self.top.ports or name in self.instances or name in SYSTEMVERILOG_KEYWORDS:
+        while self._is_taken(name):
             name, tries = f"{wanted}_net{tries if tries > 1 else ''}", tries + 1
         return name
+
+    def _is_taken(self, name: str) -> bool:
+        """Whether the module's one scope already has this name, or SystemVerilog does."""
+        return (
+            name in self.wires
+            or name in self.top.ports
+            or name in self.instances
+            or name in SYSTEMVERILOG_KEYWORDS
+            or any(name == parameter.name for parameter in self.declared)
+        )
 
     def _new_wire(self, port: _Port) -> str:
         _check_type_is_visible(port)
@@ -1975,7 +2106,9 @@ class _ModuleBuilder:
         """Decide each port's net, and what happens to a port no connection reaches."""
         for port in self.top.ports.values():
             missing = port.undriven() if port.direction is _IN else []
-            if missing:
+            if missing and self.leave_open and not port.driven:
+                self.undriven.append(port.name)  # as the design has it, and said under the module's header (D38)
+            elif missing:
                 what = "output bits" if port.width is not None else "output parts"
                 raise ValueError(f"{port.label}: top-level {what} {missing} have no driver")
 
@@ -1990,8 +2123,10 @@ class _ModuleBuilder:
                     continue
                 if port.unsupported:
                     # Left open it needs no net; an input must be driven, and a module port declared.
-                    if port.direction is _IN or self.top_component is None:
+                    if self.top_component is None or (port.direction is _IN and not (self.leave_open and not port.driven)):
                         raise ValueError(f"{port.label}: {port.unsupported}, in a module whose ports a component defines")
+                    if port.direction is _IN:
+                        port.note = _LEFT_OPEN
                     continue
                 if port.direction is _IN:
                     self._name_input(port)
@@ -2018,13 +2153,16 @@ class _ModuleBuilder:
             self._promote(port, shared=True)
         elif self.top_component is None:
             self._promote(port, shared=False)
+        elif self.leave_open:
+            port.note = _LEFT_OPEN  # as the design has it, and said where the instance is written (D38)
         else:
             # A default value doesn't change this. IEEE 1685-2022 7.5.5: a pin is not connected to its
             # default unless an ad hoc connection ties it to "default".
             raise ValueError(
                 f"{port.label} is not connected, and top component {self.top_component.vlnv} defines the module's "
                 "ports, so it cannot become one. Connect it, tie it with a tiedValue ('default' for its default "
-                "value, 'open' to leave it open), or list it in common"
+                "value, 'open' to leave it open), list it in common, or leave every such input open with the "
+                "option unconnected=open"
             )
 
     def _promote(self, port: _Port, shared: bool) -> None:
@@ -2050,11 +2188,15 @@ class _ModuleBuilder:
         labels: Set[str] = set()  # generate blocks share the module's one scope with nets, ports and instances
         lines = [self.header]
         if self.module_name and self.top_component is not None and self.top_overrides:
-            names = {p.parameter_id: p.name for p in self.top_component.parameters}
+            names = {p.parameter_id: p.name for p in self.top_parameters}
             given = ", ".join(f"{names[key]} = {value}" for key, value in self.top_overrides.items())
             lines.append(f"// The version of {self.top_component.vlnv} with {given}.")
         lines.append("")
         lines.extend(self._render_header())
+        lines.extend(self._render_parameter_checks(labels))
+        if self.undriven:
+            lines.extend(f"    // {name}: {_UNDRIVEN}" for name in self.undriven)
+            lines.append("")
         if self.wires:
             width = max(len(declaration) for declaration in self.wires.values())
             lines.extend(f"    {declaration:<{width}} {name};" for name, declaration in self.wires.items())
@@ -2071,16 +2213,35 @@ class _ModuleBuilder:
         return "\n".join(lines) + "\n"
 
     def _render_header(self) -> List[str]:
+        lines = [f"module {self.module} ("]
+        if self.declared:
+            rows = [f"    parameter {p.type_name + ' ' if p.type_name else ''}{p.name} = {p.value}" for p in self.declared]
+            lines = [f"module {self.module} #(", ",\n".join(rows), ") ("]
         if not self.top.ports:
-            return [f"module {self.module} ();", ""]
+            return [*lines[:-1], f"{lines[-1]});", ""]
         width = max(len(port.declaration) for port in self.top.ports.values())
         keywords = {_OUT: "input ", _IN: "output", _INOUT: "inout "}  # the direction from inside, flipped
         rows = [f"    {keywords[port.direction]} {port.declaration:<{width}} {port.name}" for port in self.top.ports.values()]
-        return [f"module {self.module} (", ",\n".join(rows), ");", ""]
+        return [*lines, ",\n".join(rows), ");", ""]
+
+    def _render_parameter_checks(self, labels: Set[str]) -> List[str]:
+        """Everything in the module is worked out for one value of each parameter, so the compiler refuses
+        an instance that gives another (D36)."""
+        if not self.declared:
+            return []
+        lines = ["    // Every width and value below is worked out for these values of the parameters. For others,", "    // generate the module again."]
+        for parameter in self.declared:
+            value = parameter.value if _single_token(parameter.value) else f"({parameter.value})"
+            message = f"{self.module} is generated for {parameter.name} = {parameter.value}, and was given another value"
+            lines.append(f"    if ({parameter.name} {parameter.differs} {value}) begin : {self._check_label(parameter.name + '_as_generated', labels)}")
+            lines.append(f"        $error({_sv_string(message)});")
+            lines.append("    end")
+        lines.append("")
+        return lines
 
     def _check_label(self, wanted: str, labels: Set[str]) -> str:
         name, tries = wanted, 1
-        while name in labels or name in self.wires or name in self.top.ports or name in self.instances or name in SYSTEMVERILOG_KEYWORDS:
+        while name in labels or self._is_taken(name):
             name, tries = f"{wanted}{tries}", tries + 1
         labels.add(name)
         return name
@@ -2137,7 +2298,8 @@ class _ModuleBuilder:
                 lines.append(f"        // {'Interface: ' + name if name else 'Not in any interface'}")
             for port in ports:
                 remaining -= 1
-                lines.append(f"        .{port.name:<{width}} ({port.net or ''})" + ("," if remaining else ""))
+                note = f"  // {port.note}" if port.note else ""
+                lines.append(f"        .{port.name:<{width}} ({port.net or ''})" + ("," if remaining else "") + note)
         lines.append("    );")
         return lines
 
@@ -2153,19 +2315,30 @@ def _generate(
     top_overrides: Optional[Dict[str, str]] = None,
     module_name: Optional[str] = None,
     variants: Optional[Dict[Tuple[object, ...], str]] = None,
+    leave_open: bool = False,
 ) -> None:
     _check_linked(linked)
     top_component = _find_top_component(linked, top)
     design_values: Dict[str, object] = {}
+    configuration_values: Dict[str, object] = {}
     if top_component is not None:
+        where = f"top component {top_component.vlnv}"
         view = top_view or _view_holding_design(linked.library, top_component, linked.vlnv)
-        held = _design_of_view(linked.library, top_component, view, f"top component {top_component.vlnv}")
+        held = _design_of_view(linked.library, top_component, view, where)
         if held is not None:
-            design_values = held[2]
+            design_values = held.design_values
         # A configuration the top component holds applies at the top, as it does further down.
-        if linked.design_configuration is None and held is not None and held[1] is not None:
-            linked = link(linked.design, linked.library, held[1])
+        if linked.design_configuration is None and held is not None and held.configuration is not None:
+            linked = link(linked.design, linked.library, held.configuration)
             _check_linked(linked)
+        if held is not None and held.configuration_values:
+            # Values for the configuration the component names, which may not be the one this was linked with.
+            if linked.design_configuration is None or linked.design_configuration.vlnv != held.configuration.vlnv:
+                raise ValueError(
+                    f"{where}: its reference to design configuration {held.configuration.vlnv} sets "
+                    f"{', '.join(sorted(held.configuration_values))}, and the design is configured by another one"
+                )
+            configuration_values = held.configuration_values
     builder = _ModuleBuilder(
         linked,
         common,
@@ -2176,6 +2349,8 @@ def _generate(
         design_values=design_values,
         module_name=module_name,
         variants=variants,
+        configuration_values=configuration_values,
+        leave_open=leave_open,
     )
     text = builder.build()
 
@@ -2209,10 +2384,16 @@ def _generate(
             child.overrides,
             child.module or None,
             builder.variants,
+            leave_open,
         )
 
 
-def generate_files(linked: LinkedDesign, common: Sequence[str] = (), top: Optional[str] = None) -> Dict[str, str]:
+_UNCONNECTED = ("refuse", "open")
+
+
+def generate_files(
+    linked: LinkedDesign, common: Sequence[str] = (), top: Optional[str] = None, unconnected: str = "refuse"
+) -> Dict[str, str]:
     """Return every file a design needs, by name: its module first, then any address map package
     and the modules of hierarchical instances.
 
@@ -2222,10 +2403,17 @@ def generate_files(linked: LinkedDesign, common: Sequence[str] = (), top: Option
 
     `top` is the VLNV of the hierarchical component to take the module's name and ports from, when
     more than one component holds the design. By default the library is searched for it.
+
+    `unconnected` says what happens to a port the design connects to nothing, in a module whose ports
+    a component defines: an instance's input, which cannot become a port of the module there, and an
+    output of the module that nothing drives. "refuse", the default, or "open", which leaves each as
+    the design has it and says so in the module.
     """
+    if unconnected not in _UNCONNECTED:
+        raise TypeError(f"xactflow-rtl-gen: the unconnected option is one of {', '.join(_UNCONNECTED)}, got {unconnected!r}")
     files: Dict[str, str] = {}
     written_elsewhere: Dict[str, str] = {}  # the modules of IPs, by name: the VLNV of one using each
-    _generate(linked, common, top, files, (), written_elsewhere)
+    _generate(linked, common, top, files, (), written_elsewhere, leave_open=unconnected == "open")
     for file_name in files:
         module = file_name[: -len(".sv")]
         if module in written_elsewhere:
@@ -2233,6 +2421,18 @@ def generate_files(linked: LinkedDesign, common: Sequence[str] = (), top: Option
     return files
 
 
-def generate_top(linked: LinkedDesign, common: Sequence[str] = (), top: Optional[str] = None) -> str:
+def generate_top(linked: LinkedDesign, common: Sequence[str] = (), top: Optional[str] = None, unconnected: str = "refuse") -> str:
     """Return the module of a design, without the files it may depend on. See generate_files()."""
-    return next(iter(generate_files(linked, common, top).values()))
+    return next(iter(generate_files(linked, common, top, unconnected).values()))
+
+
+def file_list(files: Dict[str, str]) -> str:
+    """The files of generate_files() as a list a compiler reads with -F, one name on each line, relative to
+    where the list is: packages first, as a module that uses one has to come after it, then the modules,
+    the one the others are instances in last."""
+    names = list(files)
+    packages = [name for name in names if re.search(r"^package\s", files[name], re.MULTILINE)]
+    modules = [name for name in reversed(names) if name not in packages]
+    header = files[names[0]].splitlines()[0]
+    lines = [header, "// What this run generated, in an order that compiles. Read it with -F: the names are relative to this file."]
+    return "\n".join([*lines, *packages, *modules]) + "\n"

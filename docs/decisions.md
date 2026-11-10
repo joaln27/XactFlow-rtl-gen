@@ -57,7 +57,7 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** the generated size or readability becomes a real problem for users.
 
 ## D5. Module ports from the hierarchical component, and a `common` option
-*2026-11-06 · active*
+*2026-11-06 · active · D38 adds an option that leaves an unconnected input open*
 
 - **Decision:** with a hierarchical component in the library, its ports define the module, and an
   unconnected input is an error. Without one, an unconnected port becomes a module port,
@@ -383,10 +383,16 @@ rounds are an adversarial AI agent attacking it.
     Croc's firmware, nine programs run in Verilator, passes on both and prints the same lines at the same
     simulation times. Verilator 5.022 builds neither with the two `--unroll` limits of Croc's own script, so
     both were built without them.
+  - **With D36,** later that day: the two components keep the module parameters `xactflow-sv` imported, and
+    Croc's testbench, which instantiates `croc_soc #(.GpioCount(32))`, is used as it is, where the test had
+    needed a copy without the parameter. The modules differ from those above only in the parameters they
+    declare and check, and in the values `croc_soc` gives its `croc_domain_1`. Given a `GpioCount` of 16, the
+    testbench is refused by the module's own check.
 - **Topwrap's examples, the same day:** five small designs whose 1685-2022 files Antmicro's Topwrap writes, tried as
   a third tool's IP-XACT. All five are refused, four of them for what is in the files: instance names that are
   no names (`2mux`, `4-bit counter`), a bus definition the library lacks, and a port whose width ignores its
-  parameter. They brought one change, D33. The fifth leaves an input unconnected, which D5 refuses.
+  parameter. They brought one change, D33. The fifth leaves an input unconnected, which D5 refuses, and an
+  output of a module undriven; with `unconnected=open` (D38) its five modules generate.
 
 ## D25. A design reference's values set the design's parameters
 *2026-11-09 · active*
@@ -405,7 +411,7 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** XactFlow's `link()` starts applying these values itself; then take its result.
 
 ## D26. One module for each set of values a hierarchical instance is given
-*2026-11-09 · active*
+*2026-11-09 · active · since D36 a generated module declares parameters, each for the one value it is generated for*
 
 - **Decision:** a hierarchical instance whose overrides change a parameter of its component gets a module of its
   own, generated with those values throughout its design: `<module>_1`, `<module>_2`, ... in the order they turn
@@ -572,3 +578,80 @@ rounds are an adversarial AI agent attacking it.
 - **Considered:** renumbering the part select for the module port, which is right too, but makes the line say
   something the design does not.
 
+## D36. A generated module declares its component's module parameters, each for one value
+*2026-11-10 · active · changes D26's "the module takes no parameters"*
+
+- **Decision:** when the view that holds a design also names a component instantiation, its module parameters
+  become parameters of the generated module. Each is declared with its `dataType`, if it has one, and with the
+  value the module is generated for: the component's, with the overrides of the instance it is generated for
+  (D26). Under the header the module has the compiler check each one,
+  `if (W !== 16) begin : W_as_generated $error("..."); end`, so an instance that gives another value is refused
+  at elaboration. A real number or a string is compared with `!=`, which `!==` does not take.
+  - A hierarchical instance is given those values in its `#(...)`, like any instance. An override on it may
+    name a module parameter of that view, or a parameter of its component instantiation, as on any other
+    instance; before, only the component's own.
+  - A parameter the HDL would work out from the others (D19) is declared with its worked-out value: here the
+    generated module is the HDL.
+  - The module's ports and parameters see the component instantiation's parameters. Expressions in the design
+    still see only the component's (D12).
+- **Why:** code written by hand instantiates these modules with parameters. Croc's testbench has
+  `croc_soc #(.GpioCount(32))`, so the generated module could not take the hand-written one's place without a
+  changed testbench. `xactflow-sv` imports every module with its parameters, so a hierarchical component made
+  from an import was refused until they were taken out. Accellera's IP-XACT User Guide has such a component in
+  its Example 67.
+- **What it is not:** the parameters do not configure the module. Everything in it is still worked out for one
+  set of values (D11), and another set still needs another module (D26). The guide's netlist passes the
+  expression on, `B #(.pB((pA*4)+7))`; this one writes `B #(.pB(19))` and refuses a `pA` other than 3.
+- **How strong:** as D21. slang and Icarus 13 stop. Verilator reports it as a warning, `USERERROR`, which stops
+  a build unless it runs with `-Wno-fatal`. Icarus 12 skips it.
+- **Refused:** a type parameter on a generated module; a `dataType` that is not a type's name, or a typedef
+  without its package; a value that cannot be compared, such as an assignment pattern; a parameter named like
+  a port or an instance of the module.
+- **Considered:** carrying expressions instead of numbers through the module, D26's alternative, which is the
+  real thing and changes every width check; declaring the parameters with no check, which would take another
+  value without a word; `$fatal`, which Verilator also only warns about.
+- **Revisit if:** a module has to be configurable after it is generated. Then the expressions have to be
+  carried.
+
+## D37. A design configuration reference's values set the configuration's parameters
+*2026-11-10 · active*
+
+- **Decision:** the `configurableElementValues` on a component's reference to its design configuration give
+  that configuration's parameters their values, worked out in the component, as a design reference's are (D25).
+  They belong to the configuration the reference names: where the design was linked with another one, they are
+  refused, not given to it. A value for a parameter the configuration lacks is refused.
+- **Why:** it is D25 again, for the other document a view can name. The user guide's Example 68 passes a
+  component's parameters to a module parameter this way, through the configuration's own parameter and a
+  `viewConfiguration`. Such values used to be refused.
+- **Revisit if:** XactFlow's `link()` starts applying these values itself.
+
+## D38. An option leaves what the design connects to nothing as it is
+*2026-11-10 · active · narrows D5*
+
+- **Decision:** with `unconnected=open`, a port the design connects to nothing stays that way, in a module
+  whose ports a component defines. An instance's input is left open, `.port ()`, with a comment next to it,
+  and an output of the module that nothing drives is left undriven, with a comment under the module's header.
+  The default, `refuse`, is D5 as it was. A port connected or driven only in part is still refused. With no
+  hierarchical component such an input still becomes a port of the module.
+- **Why:** D5 calls a floating input a bug, which it is in a design one is writing. A design from elsewhere
+  may leave ports unconnected on purpose: one of Topwrap's examples has an input and an output it calls
+  empty, and adding `tiedValue="open"` to each in someone else's file is not always possible. It is also what
+  the design says: 7.5.5 connects such a port to nothing, not even its default (D8). Linters still report
+  each input, as slang's `EmptyInputPortConn` and Verilator's `PINCONNECTEMPTY`. That example now generates.
+- **Considered:** tying them to their default values, as Kactus2 does, which the standard rules out (D8); a
+  warning in place of an option, which the plugin interface has no way to give.
+- **Revisit if:** XactFlow gets a way to report warnings; then the default could warn and go on.
+
+## D39. A file list, when asked for
+*2026-11-10 · active*
+
+- **Decision:** `filelist=<name>` writes a list of the files a run generated into the output folder: packages
+  first, then the modules, the design's own last, one name on a line, relative to the list, for a compiler's
+  `-F`. It starts with the same header as the modules, so it is regenerated over and never replaces a file
+  written by hand.
+- **Why:** a build system has to know what was generated, and in which order it compiles: an address map
+  package before its module. A version's name can change between runs (D26), and the old file stays in the
+  folder; the list says which files belong to this run.
+- **Considered:** always writing `<module>.f`, which adds a file to every output folder and may find a list
+  written by hand in its way; IP-XACT file sets on a generated component, the standard's way and a larger step.
+- **Revisit if:** a build system integration, such as a SoCMake function, needs another form.

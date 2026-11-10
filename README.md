@@ -54,6 +54,7 @@ RtlExporter().export(linked, "rtl", common="clk_i,rst_ni")  # or written to rtl/
 - `<module>.sv`: the design's module.
 - `<module>_addr_map_pkg.sv`: its address map, if the design records address windows. Compile it first.
 - One more `<module>.sv` for each hierarchical instance, at any depth.
+- With the `filelist` option, a list of those files in an order that compiles.
 
 ### Options
 
@@ -62,6 +63,12 @@ RtlExporter().export(linked, "rtl", common="clk_i,rst_ni")  # or written to rtl/
 - `lib`: folders to scan for the library, when exporting an `ipxact.Design`. Comma-separated, or a list
   from Python.
 - `top`: the VLNV of the hierarchical component to use, when more than one holds the design.
+- `unconnected`: what happens to a port the design connects to nothing, in a module whose ports a
+  hierarchical component defines: an instance's input, or an output of the module. `refuse`, the default,
+  stops with an error. `open` leaves it as the design has it, open or undriven, with a comment that says
+  so (D38).
+- `filelist`: a file name, such as `soc.f`. The files of this run are listed in it, packages first and the
+  design's module last, relative to the list: `verilator -F rtl/soc.f` (D39).
 
 ## What the output looks like
 
@@ -97,7 +104,24 @@ instance or a port.
 module: its name, and exactly its ports. This is the standard's own way, and you can connect to those
 ports with `externalPortReference` and `hierInterface`. An input no connection reaches is an error,
 unless it is listed in `common`, because the component says what the ports are and floating an input is
-a bug. An output nothing reads is left open.
+a bug, and so is an output of the module that nothing drives. The option `unconnected=open` leaves both as
+they are, for a design that means them to be. An instance's output nothing reads is left open.
+
+If that view also names a component instantiation with module parameters, the module declares them, so
+that code which instantiates it with `#(...)` still compiles. They do not configure it: each has the one
+value the module is generated for, and the module has the compiler refuse any other (D36):
+
+```systemverilog
+module croc_soc #(
+    parameter int unsigned GpioCount = 32
+) (
+    ...
+);
+
+    if (GpioCount !== 32) begin : GpioCount_as_generated
+        $error("croc_soc is generated for GpioCount = 32, and was given another value");
+    end
+```
 
 **Without one**, the design is all there is. An `externalPortReference` declares a port. A port no
 connection reaches becomes a top-level port, `<instance>_<port>`, or the shared `common` port, so
@@ -112,13 +136,15 @@ the component can say which ports those are.
 - **A view's choices:** an instance uses the abstraction type, driver and type definitions of its view.
 - **A design configuration:** the one given to `link()`, else the one the hierarchical component's view
   holds, at any depth.
-- **A hierarchical instance:** its view holds a design, which gets its own module. The generated modules take
-  no parameters, as every value in them is worked out, so an instance whose overrides change a parameter of
-  its component gets a module of its own, `<module>_1`, `<module>_2`, ..., one for each set of values, with
-  those values all the way down its design (D26). Its first line says which values it is for.
+- **A hierarchical instance:** its view holds a design, which gets its own module. Every value in a generated
+  module is worked out, so an instance whose overrides change a parameter of its component gets a module of
+  its own, `<module>_1`, `<module>_2`, ..., one for each set of values, with those values all the way down its
+  design (D26). Its first line says which values it is for. If the module declares parameters (D36), the
+  instance is given the values it is generated for.
 - **A design's parameters:** a component's reference to the design it holds can give them values, worked out
   in the component, so a top component or a hierarchical instance sets its design's parameters this way. That
-  works when the view names a design configuration as well, as Kactus2 writes it (D25).
+  works when the view names a design configuration as well, as Kactus2 writes it (D25). Its reference to the
+  design configuration gives that one's parameters values the same way (D37).
 - **Parameters:** every module parameter of the view is written, with its value in this design, because
   the HDL's own default can differ from the component's. The exception is one worked out only from the
   instance's other module parameters, as an imported HDL default such as `B = A + 8'd100` is: the HDL works
@@ -211,11 +237,14 @@ It raises `ValueError` rather than writing wrong RTL:
 - a top-level output nothing drives;
 - a constant that does not fit its port, positive or negative, which would silently lose bits (for a type only the
   compiler knows the width of, the compiler refuses it, through the check above);
-- parameter overrides on a reference to a design configuration, a bus or an abstraction, which nothing here
-  would apply;
+- parameter overrides on a reference to a bus or an abstraction, or from a design configuration to its design,
+  which nothing here would apply;
 - a view that names a design and a design configuration for another design;
-- a value on a design reference, or on a hierarchical instance, for a parameter that design or component
-  does not have;
+- a value on a reference to a design or a design configuration, or on a hierarchical instance, for a parameter
+  that document or component does not have, and values for one design configuration when the design is linked
+  with another;
+- on a generated module: a type parameter, a parameter whose type is a typedef without its package, one whose
+  value cannot be compared, such as an assignment pattern, and one named like a port or an instance (D36);
 - a name in a parameter's value that no parameter in scope explains, and a typedef whose name has no package,
   which a generated module could not see;
 - address windows that overlap on one decoder or pass the end of their bus's address space, a window with no
@@ -239,7 +268,10 @@ It raises `ValueError` rather than writing wrong RTL:
   unpacked arrays (an instance's output that nothing connects is left open, D28), interface ports, indexed part selects, a part select on an inout, a subPort, a struct that is not a
   one-dimensional array, or a port with several dimensions, a part select running the other way from its port, a
   sub-port of an array of structs with no element picked, a constant into several elements of one, an abstraction's default next to tie-offs for some of its bits, an ascending logical range, an inverted inout, two inouts of the module on one net, logical slices on an inout of the module
-  not declared from bit 0, abstractors, and module parameters on the top component.
+  not declared from bit 0, abstractors, and type parameters on a generated module.
+- **A generated module's parameters do not configure it.** It is generated for one value of each, and another
+  value needs it generated again (D36). Verilator reports the module's own check of that as a warning, so a build
+  with `-Wno-fatal` goes on past it; Icarus 12 skips it.
 - **A sub-port of a struct with no sub-ports listed cannot be width-checked.** `xactflow-sv` leaves them out.
   Nor is its type known, so a member that is an enum gets no cast, and slang and Verilator reject what drives it.
   Listing the sub-ports in the component fixes both (`docs/findings.md`, F2).
@@ -303,7 +335,8 @@ in `docs/decisions.md`). The scripts for these are kept outside this repository.
   imported, and generated. With the generated modules in place of the hand-written ones, Croc's testbench
   elaborates in slang and lints in Verilator with the same messages, and each of the 3769 port bits traced has
   the same driver, and each of the 110 instance parameters the same value. Croc's firmware, nine programs run
-  in Verilator, passes on both and prints the same lines at the same simulation times.
+  in Verilator, passes on both and prints the same lines at the same simulation times. The generated `croc_soc`
+  declares the parameter Croc's testbench gives it, so the testbench elaborates as it is.
 
 ## Development
 
@@ -318,6 +351,8 @@ in `docs/decisions.md`). The scripts for these are kept outside this repository.
 - `tests/test_adversarial.py` holds designs written to get wrong RTL past the exporter, and that once did.
 - `tests/test_type_parameters.py` holds type parameters and arrays of structs as PULP's IPs have them, the last
   of them imported by `xactflow-sv` itself.
+- `tests/test_module_parameters.py` holds the parameters of a generated module, and that each tool refuses an
+  instance that gives one another value.
 
 Verilator and Icarus Verilog are skipped when not installed; slang always runs. CI installs both from Ubuntu's
 packages.
