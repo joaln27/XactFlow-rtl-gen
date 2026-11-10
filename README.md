@@ -55,6 +55,7 @@ RtlExporter().export(linked, "rtl", common="clk_i,rst_ni")  # or written to rtl/
 - `<module>_addr_map_pkg.sv`: its address map, if the design records address windows. Compile it first.
 - One more `<module>.sv` for each hierarchical instance, at any depth.
 - With the `filelist` option, a list of those files in an order that compiles.
+- With the `socgen_package` option, one more package: every module's windows in PeakRDL-socgen's layout.
 
 ### Options
 
@@ -69,6 +70,12 @@ RtlExporter().export(linked, "rtl", common="clk_i,rst_ni")  # or written to rtl/
   so (D38).
 - `filelist`: a file name, such as `soc.f`. The files of this run are listed in it, packages first and the
   design's module last, relative to the list: `verilator -F rtl/soc.f` (D39).
+- `socgen_package`: a package name, such as `soc_addr_map_pkg`, for one more package holding the address
+  windows of every module this run generates in PeakRDL-socgen's layout, for testbenches and other files
+  written against that tool's package. See [Address map](#address-map) (D43).
+- `socgen_names`: what socgen calls the decoders and targets in that package, as `instance:name` pairs,
+  comma-separated, or a dict from Python: `xbar_i:main_interconnect,ram_i:ram`. An instance not given goes by
+  its own name.
 
 ## What the output looks like
 
@@ -224,6 +231,34 @@ those windows as constants, and one rule table for each instance that decodes th
 - The address width comes from the logical port the abstraction marks with `isAddress`, and may use the
   abstraction's parameters. Each window has to fit its own bus; the package uses the widest. With no
   `isAddress` at all, it is 32 bits, or 64 if a window needs it.
+
+### In PeakRDL-socgen's layout
+
+A flow moving from PeakRDL-socgen may have testbenches or software that import its `soc_addr_map_pkg`. The
+`socgen_package` option writes a package with that layout as well, from the same windows, for every module
+the run generates, the top first. The modules themselves keep using their own packages.
+
+```systemverilog
+    localparam MAIN_INTC_NMASTER = 1;
+    localparam MAIN_INTC_NSLAVE  = 3;
+    localparam MAIN_INTC_BASE_ADDRESS = 32'h10000000;
+    localparam logic [31:0] RAM_MAIN_INTC_START_ADDRESS = MAIN_INTC_BASE_ADDRESS + 32'h00000000;
+    localparam logic [31:0] RAM_MAIN_INTC_SIZE = 32'h00002000;
+    localparam logic [31:0] RAM_MAIN_INTC_END_ADDRESS = RAM_MAIN_INTC_START_ADDRESS + RAM_MAIN_INTC_SIZE;
+    localparam logic [31:0] RAM_MAIN_INTC_IDX = 32'd0;
+```
+
+- Names follow socgen's: a decoder's constants start with its name with `interconnect` shortened to `intc`,
+  and a window's with the name of what it reaches, then the decoder's. socgen names them after its own
+  description, which a design does not hold, so `socgen_names` gives the names: `xbar_i:main_interconnect`
+  makes `MAIN_INTC`. Two constants that come out the same are refused.
+- `_NMASTER` counts the decoder's `target` and `mirroredInitiator` interfaces the design connects. `_IDX` is
+  the rule's `idx`, as above. `_BASE_ADDRESS` is where the decoder's lowest window starts: socgen writes the
+  base of the subsystem, which is the same when its first window is at offset 0.
+- `<INTC>_ADDR_RULES` holds the windows in `addr_map_rule_t`, three 32-bit fields `idx`, `start_addr` and
+  `end_addr`, the first window in the highest element as in socgen's.
+- Its addresses are 32 bits, so a wider address map is refused, and so is a window reached from outside the
+  module, which socgen's layout has no place for.
 
 ## What it refuses
 

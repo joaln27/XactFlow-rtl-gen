@@ -37,6 +37,11 @@ class RtlExporter(Exporter):
               default, or `open`, which leaves it as the design has it.
       filelist: the name of a file to write next to the modules, listing what was generated in an
               order that compiles, for a compiler's -F.
+      socgen_package: the name of one more package to write, such as `soc_addr_map_pkg`: the address
+              windows of every module generated, in PeakRDL-socgen's layout, for files written
+              against that tool's package.
+      socgen_names: what socgen calls the decoders and targets in that package, as `instance:name`
+              pairs, comma-separated, or a dict. An instance not given goes by its own name.
     """
 
     name = "rtl-gen"
@@ -47,6 +52,8 @@ class RtlExporter(Exporter):
         top = options.pop("top", None)
         unconnected = options.pop("unconnected", "refuse")
         filelist = options.pop("filelist", None)
+        socgen_package = options.pop("socgen_package", None)
+        socgen_names = options.pop("socgen_names", None)
         if options:
             raise TypeError(f"xactflow-rtl-gen got unknown options: {', '.join(sorted(options))}")
         if filelist is not None and (
@@ -54,7 +61,7 @@ class RtlExporter(Exporter):
         ):
             raise TypeError(f"xactflow-rtl-gen: the filelist option is a file name in the output folder, got {filelist!r}")
 
-        files = generate_files(self._linked(subject, lib), common, top, unconnected)
+        files = generate_files(self._linked(subject, lib), common, top, unconnected, socgen_package, socgen_names)
         if filelist is not None:
             if filelist in files:
                 raise ValueError(f"the file list cannot be called {filelist}: a generated module has that file")

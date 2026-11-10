@@ -725,3 +725,30 @@ rounds are an adversarial AI agent attacking it.
 - **Under D22** another round is due after silent wrong RTL that a real flow could hit. The one silent case
   takes two struct types of one size with their members listed, which no importer writes, so the rounds rest.
   What held up is in the round's report, kept with its reproducers outside this repository.
+
+## D43. A package in PeakRDL-socgen's layout, when asked for
+*2026-11-10 · active · next to D7*
+
+- **Decision:** the `socgen_package` option writes one more package, named by it, holding the windows of every
+  module the run generates in PeakRDL-socgen's layout: per decoder `_NMASTER`, `_NSLAVE`, `_BASE_ADDRESS` and
+  an `addr_map_rule_t` table `_ADDR_RULES`, per window `_START_ADDRESS`, `_SIZE`, `_END_ADDRESS` and `_IDX`,
+  named as socgen names them. `socgen_names` gives what socgen calls each decoder and target, since its names
+  come from its own description, which the design does not hold. The modules keep using their own packages.
+- **Why:** in the test SoC (D13) the generated modules could replace socgen's, but its testbench imports
+  socgen's package for two window sizes, so the build still needed socgen's output. Flows that move from socgen
+  have such files. With the names given, all 56 constants of the test SoC's package come out with socgen's
+  names and the same values, the rule tables in the same element order, as slang elaborates both.
+- **How it is written:** from what socgen's output looks like, not from its template, which is GPL-3. The
+  table is a concatenation cast to its type, as in D7, since Icarus does not read an assignment pattern on a
+  packed array.
+- **Where it differs:** `_BASE_ADDRESS` is where the decoder's lowest window starts, while socgen writes where
+  its subsystem starts. They are the same when the subsystem's first window is at offset 0, as in the test
+  SoC; the windows' own constants are right either way. A window reached from outside the module, an address
+  map wider than 32 bits and a window of 4 GB are refused, as the layout has no place for them.
+- **Considered:** taking socgen's names from the instance names, dropping a trailing `_i`, which fails where
+  socgen puts a bridge between the decoder and the target and names the window after the target; a name on
+  the `addressMapping` extension, which belongs to `archidesc`; and a package written by hand next to the
+  test SoC, which leaves every other socgen flow to do the same.
+- **Revisit if:** PeakRDL-socgen changes its package's layout (this is the layout of its 0.0.4), or IP-XACT
+  address maps (`remapAddress` on a bridge's interfaces) replace the `addressMapping` extension and bring
+  names with them.

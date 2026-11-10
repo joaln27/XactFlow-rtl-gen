@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 import ipxact
 from xactflow import ExpressionError, LinkedDesign, evaluate, parameter_resolver
 
+from .keywords import SYSTEMVERILOG_KEYWORDS
+
 _ATTRIBUTE = re.compile(r"""(baseAddr|size)=["']([^"']+)["']""")
 _DEFAULT_WIDTH = 32
 _OUTBOUND = (ipxact.InterfaceMode.INITIATOR, ipxact.InterfaceMode.MIRRORED_TARGET)  # what a decoder sends through
+_INBOUND = (ipxact.InterfaceMode.TARGET, ipxact.InterfaceMode.MIRRORED_INITIATOR)  # what brings it addresses
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
 def for_view(items: Iterable, view: Optional[ipxact.View]) -> List:
@@ -57,6 +61,7 @@ class AddressMap:
     package: str
     width: int
     tables: Dict[str, List[Rule]]
+    hosts: Dict[str, int] = field(default_factory=dict)  # how many of each decoder's interfaces that take addresses in are connected
 
     def constant(self, decoder: str, what: str) -> str:
         return f"{_constant_name(decoder)}_{what}"
@@ -188,7 +193,17 @@ def build_address_map(
                     f"{lower.base:#x}-{lower.end:#x} and {upper.base:#x}-{upper.end:#x}, both decoded by {decoder}"
                 )
     _name_constants(tables)
-    return AddressMap(module, f"{module}_addr_map_pkg", width, tables)
+    hosts = {decoder: 0 for decoder in tables}
+    taken = {
+        (endpoint.instance.instance_name, endpoint.bus_interface.name)
+        for connection in linked.interconnections
+        for endpoint in connection.endpoints
+        if endpoint.bus_interface.mode in _INBOUND
+    }
+    for instance, _ in taken:
+        if instance in hosts:
+            hosts[instance] += 1
+    return AddressMap(module, f"{module}_addr_map_pkg", width, tables, hosts)
 
 
 def render_address_map(address_map: AddressMap, header: str) -> str:
@@ -245,4 +260,132 @@ def render_address_map(address_map: AddressMap, header: str) -> str:
         lines.append(f"    localparam logic [{2 * width * len(rules) - 1}:0] {address_map.constant(decoder, 'ADDR_PAIRS')} = {{{pairs}}};")
         lines.append("")
     lines.append("endpackage")
+    return "\n".join(lines) + "\n"
+
+
+# PeakRDL-socgen's layout of an address map package, for files written against its package: what its
+# output looks like, not its code (a GPL-3 template). An interconnect's constants start with its name, with
+# "interconnect" shortened to "intc", and a window's with the name of what it reaches, then the interconnect's.
+SOCGEN_WIDTH = 32
+
+
+def socgen_names(value: Union[str, Mapping[str, str], Sequence[str], None]) -> Dict[str, str]:
+    """The socgen_names option: what socgen calls an instance, as `instance:name` pairs, comma-separated
+    from the CLI, or a dict or list of pairs from Python."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        pairs = list(value.items())
+    else:
+        items = value.split(",") if isinstance(value, str) else list(value)
+        pairs = []
+        for item in (item.strip() for item in items):
+            if not item:
+                continue
+            if item.count(":") != 1:
+                raise TypeError(f"xactflow-rtl-gen: socgen_names takes instance:name pairs, got {item!r}")
+            instance, name = (part.strip() for part in item.split(":"))
+            pairs.append((instance, name))
+    names: Dict[str, str] = {}
+    for instance, name in pairs:
+        for what, text in (("instance", instance), ("name", name)):
+            if not isinstance(text, str) or not _IDENTIFIER.fullmatch(text):
+                raise TypeError(f"xactflow-rtl-gen: socgen_names: {what} {text!r} is not an identifier")
+        if names.setdefault(instance, name) != name:
+            raise TypeError(f"xactflow-rtl-gen: socgen_names gives {instance} two names, {names[instance]} and {name}")
+    return names
+
+
+def render_socgen_package(address_maps: Sequence[AddressMap], package: str, names: Mapping[str, str], header: str) -> str:
+    """The windows of every module generated, in one package with PeakRDL-socgen's layout.
+
+    Per interconnect: <INTC>_NMASTER, the interfaces that bring it addresses and are connected; <INTC>_NSLAVE,
+    its windows; <INTC>_BASE_ADDRESS, where the lowest of them starts (socgen writes the base of the subsystem,
+    the same whenever its first window is at offset 0); and <INTC>_ADDR_RULES, the rule table, its first
+    window in the highest element. Per window: <NAME>_<INTC>_START_ADDRESS, _SIZE, _END_ADDRESS and _IDX.
+    Its addresses are 32 bits, like socgen's, so a wider map is refused."""
+    if not _IDENTIFIER.fullmatch(package) or package in SYSTEMVERILOG_KEYWORDS:
+        raise TypeError(f"xactflow-rtl-gen: socgen_package {package!r} is not a package name")
+    owners: Dict[str, str] = {}
+
+    def claim(name: str, owner: str) -> str:
+        if owners.setdefault(name, owner) != owner:
+            raise ValueError(f"in the socgen package, {owners[name]} and {owner} would both define {name}: give one another name with socgen_names")
+        return name
+
+    def literal(value: int) -> str:
+        return f"32'h{value & 0xFFFF_FFFF:08x}"
+
+    known = set()
+    declarations: List[str] = []
+    tables: List[str] = []
+    for address_map in address_maps:
+        if address_map.width > SOCGEN_WIDTH:
+            raise ValueError(f"module {address_map.module}: its address map is {address_map.width} bits wide, and the socgen package's addresses are {SOCGEN_WIDTH}")
+        for decoder, rules in address_map.tables.items():
+            if rules[0].from_outside:
+                raise ValueError(f"module {address_map.module}: windows reached from outside it, through its own interfaces, have no place in the socgen package")
+            known.add(decoder)
+            where = f"{decoder} in {address_map.module}"
+            intc = _constant_name(names.get(decoder, decoder).replace("interconnect", "intc"))
+            base = min(rule.base for rule in rules)
+            declarations += [
+                f"    // Decoded by {where}",
+                f"    localparam {claim(f'{intc}_NMASTER', where)} = {address_map.hosts.get(decoder, 0)};",
+                f"    localparam {claim(f'{intc}_NSLAVE', where)}  = {len(rules)};",
+                f"    localparam {claim(f'{intc}_BASE_ADDRESS', where)} = {literal(base)};",
+                "",
+            ]
+            entries = []
+            for rule in rules:
+                if rule.size > 0xFFFF_FFFF:
+                    raise ValueError(f"the address window of {rule.target}, decoded by {where}, is {rule.size:#x} bytes, which 32 bits cannot hold")
+                target = rule.target.split(".")[0]
+                known.add(target)
+                prefix = _constant_name(names.get(target, target), intc)
+                owner = f"the window of {rule.target}, decoded by {where}"
+                start, size, end, idx = (claim(f"{prefix}_{what}", owner) for what in ("START_ADDRESS", "SIZE", "END_ADDRESS", "IDX"))
+                declarations += [
+                    f"    // {decoder}.{rule.interface} reaches {rule.target}",
+                    f"    localparam logic [31:0] {start} = {intc}_BASE_ADDRESS + {literal(rule.base - base)};",
+                    f"    localparam logic [31:0] {size} = {literal(rule.size)};",
+                    f"    localparam logic [31:0] {end} = {start} + {size};",
+                    f"    localparam logic [31:0] {idx} = 32'd{rule.index};",
+                    "",
+                ]
+                entries.append(f"        {{{idx}, {start}, {end}}}")
+            table = claim(f"{intc}_ADDR_RULES", where)
+            table_type = claim(f"{table}_t", where)
+            # A concatenation, the first window in the highest element as in socgen's, for the reason
+            # render_address_map gives. The cast keeps slang from warning.
+            tables += [
+                f"    typedef addr_map_rule_t [{intc}_NSLAVE-1:0] {table_type};",
+                f"    localparam {table_type} {table} = {table_type}'({{",
+                ",\n".join(entries),
+                "    });",
+                "",
+            ]
+    if not declarations:
+        raise ValueError(f"the socgen_package option asks for {package}, and no module generated here has an address window")
+    unknown = sorted(set(names) - known)
+    if unknown:
+        raise ValueError(f"socgen_names names {', '.join(unknown)}, which no address window here is decoded by or reaches")
+    claim("addr_map_rule_t", "the rule type")
+    lines = [
+        header,
+        "// The address windows of every module generated with this one, in PeakRDL-socgen's layout, for files",
+        "// written against its package. The modules themselves take theirs from their own <module>_addr_map_pkg.",
+        "",
+        f"package {package};",
+        "",
+        "    typedef struct packed {",
+        "        logic [31:0] idx;",
+        "        logic [31:0] start_addr;",
+        "        logic [31:0] end_addr;  // exclusive: start_addr + size",
+        "    } addr_map_rule_t;",
+        "",
+        *declarations,
+        *tables,
+        "endpackage",
+    ]
     return "\n".join(lines) + "\n"
