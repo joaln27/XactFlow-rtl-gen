@@ -205,12 +205,14 @@ def _sv_string(text: str) -> str:
     return '"' + _one_line(text).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
-def _compiler_check(condition: str, label: str, message: str) -> List[str]:
+def _compiler_check(condition: str, label: str, message: str, at_run_time: bool = True) -> List[str]:
     """What the generated module has the compiler check, where only the compiler can. `$error` stops a tool as
     it elaborates the module. One that skips such a line, or reports it and goes on, stops when its simulation
-    starts, on the `$fatal` (D40)."""
+    starts, on the `$fatal` (D40). `at_run_time` is False for a condition on `$bits`: with Icarus 12 the
+    `$fatal` of such a block stopped simulations that had nothing wrong."""
     text = _sv_string(message)
-    return [f"    if ({condition}) begin : {label}", f"        $error({text});", f"        initial $fatal(1, {text});", "    end"]
+    stop = [f"        initial $fatal(1, {text});"] if at_run_time else []
+    return [f"    if ({condition}) begin : {label}", f"        $error({text});", *stop, "    end"]
 
 
 def _sv_number(value: Union[int, float]) -> str:
@@ -2285,7 +2287,7 @@ class _ModuleBuilder:
                 sink = side(assign.sink)
                 label = self._check_label(re.sub(r"\W+", "_", sink).strip("_") + "_fits", labels)
                 message = f"{where}: the constant {value} does not fit in {assign.sink.port.label}{assign.sink.select}" + (f", a {assign.cast}" if assign.cast else "")
-                rows.extend(_compiler_check(f"$bits({sink}) < {bits}", label, message))
+                rows.extend(_compiler_check(f"$bits({sink}) < {bits}", label, message, at_run_time=False))
         return rows
 
     @staticmethod

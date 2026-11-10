@@ -33,13 +33,11 @@ from builders import (
     port_map,
     refused,
     simulate,
-    simulation_says,
     slang_errors,
     struct,
     verilator_lint,
     vlnv_ref,
     wire,
-    without_elaboration_checks,
 )
 from xactflow_rtl_gen import RtlExporter, generate_files
 
@@ -1086,10 +1084,9 @@ def test_a_constant_too_wide_for_an_enum_is_stopped_by_the_compiler(tmp_path):
             simulate(tmp_path, {"mode_pkg.sv": ENUM_PACKAGE, **files}, [ENUMS], bench("soc", {}, {"g_seen_o": (2, 2)}), top="tb")
     if has_verilator:
         assert verilator_lint(tmp_path, {"mode_pkg.sv": ENUM_PACKAGE, **files}, [ENUMS], "soc").returncode != 0
-    if has_icarus:  # a tool that goes on past the check stops when its simulation starts (D40)
-        skipping = {"mode_pkg.sv": ENUM_PACKAGE, **without_elaboration_checks(files)}
-        said = simulation_says(tmp_path, skipping, [ENUMS], bench("soc", {}, {"g_seen_o": (2, 2)}))
-        assert "the constant 6 does not fit in g.mode_i, a mode_pkg::mode_e" in said and "PASS" not in said
+    # Only a parameter's check also stops the simulation (D40): with Icarus 12 that line stopped, from inside
+    # this kind of block, simulations whose constant fits.
+    assert "$fatal" not in files["soc.sv"]
     # one that fits, or a single bit, which any type holds, is left alone
     assert "$bits" not in files_of(design("soc", [instance("g", "mode_getter")], ad_hocs=[ad_hoc("t", ("g", "mode_i"), tied=1)]), [mode_getter()])["soc.sv"]
 

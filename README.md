@@ -176,7 +176,7 @@ the component can say which ports those are.
   an enum, a constant or an inverted value is cast to it, `mode_pkg::mode_e'(2)`. Where only the compiler knows
   the width, the module has it check that the constant fits, with `$bits` and `$error` at elaboration. slang,
   Verilator and Icarus 13 stop there. Icarus 12 skips such a line, and Verilator with `-Wno-fatal` only reports
-  it: their simulation stops as it starts, on a `$fatal` under it (D40).
+  it.
 - **A port map with no logical range:** on a wire port it takes logical bits [the port's width - 1:0], as Annex
   B.1.7 of the standard says, so an end narrower than the others gets the low bits, such as a 12-bit memory
   address on a 32-bit bus. A bit read that no end drives is refused, as the standard doesn't say what it gets.

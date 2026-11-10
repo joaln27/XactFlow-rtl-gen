@@ -270,7 +270,7 @@ rounds are an adversarial AI agent attacking it.
   names.
 
 ## D21. Where only the compiler knows a width, the compiler checks the constant
-*2026-11-09 · active · D40 closes the two gaps under "How strong"*
+*2026-11-09 · active · the two gaps under "How strong" stay: D40's second line is for a parameter's check only*
 
 - **Decision:** a constant tied to a port or sub-port whose width the exporter can't know, such as an enum or a
   struct member nothing lists, comes with an elaboration-time check in the generated module:
@@ -656,12 +656,17 @@ rounds are an adversarial AI agent attacking it.
   written by hand in its way; IP-XACT file sets on a generated component, the standard's way and a larger step.
 - **Revisit if:** a build system integration, such as a SoCMake function, needs another form.
 
-## D40. A compiler's check also stops the simulation
-*2026-11-10 · active · strengthens D21 and D36*
+## D40. A parameter's check also stops the simulation
+*2026-11-10 · active · strengthens D36 · narrowed the same day to leave D21's check as it was*
 
-- **Decision:** each check the generated module gives the compiler has a second line with the same message,
+- **Decision:** the check of a parameter's value (D36) has a second line with the same message,
   `initial $fatal(1, "...")`, inside the same block:
   `if (W !== 16) begin : W_as_generated $error("..."); initial $fatal(1, "..."); end`.
+- **Not on the check that a constant fits (D21).** It had the line for a few hours. The first CI run with
+  Icarus 12 then failed five simulations whose constant fits: each stopped as it started. That Icarus runs the
+  `initial` in the block of an `if ($bits(net) < N)` where the condition does not hold, which went unseen
+  while all the block held was an `$error` it skips. The parameter checks, whose conditions compare a
+  parameter with a value, pass there. So D21's check is as D21 left it, with its two gaps.
 - **Why:** D21 recorded two gaps. Verilator reports an elaboration-time `$error` as a warning, so a build with
   `-Wno-fatal` goes on, and Icarus 12 skips such a line in a generate block. With D36 the first one matters
   more: Croc builds with `-Wno-fatal`, so a testbench that gave `croc_soc` another `GpioCount` would have
