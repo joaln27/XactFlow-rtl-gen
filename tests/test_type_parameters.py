@@ -7,6 +7,7 @@ xactflow-sv imports such modules, and the last tests go through the importer its
 
 import ipxact
 import pytest
+from xactflow import Library
 
 from builders import (
     ad_hoc,
@@ -445,7 +446,9 @@ def test_modules_imported_by_xactflow_sv_generate_and_run(tmp_path, run):
     def imported(name):
         path = tmp_path / f"{name}.sv"
         path.write_text(MODULES[name])
-        return xactflow_sv.SVImporter().import_(path, metadata=str(metadata))
+        library = Library()
+        xactflow_sv.SVImporter().import_(path, library, metadata=str(metadata))
+        return next(library.targets(ipxact.Component))
 
     documents = [imported(name) for name in ("typed_src", "fan", "typed_dst", "pair_dst", "sized_dst", "sender")]
     soc = design(

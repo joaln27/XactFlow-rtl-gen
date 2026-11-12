@@ -1,4 +1,4 @@
 -e .[dev]
 # The rest of the toolchain, to run the whole flow from SystemVerilog to RTL.
-xactflow-sv>=0.1.2
-xactflow-component>=0.2.0
+xactflow-sv>=0.2.1
+xactflow-component>=0.2.1

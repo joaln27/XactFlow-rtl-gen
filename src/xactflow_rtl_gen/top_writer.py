@@ -110,6 +110,12 @@ def _two_bounds(dimension: str) -> Optional[Tuple[str, str]]:
     return dimension[: found[0]].strip(), dimension[found[0] + 1 :].strip()
 
 
+def _module_from(name: str, suffix: str) -> str:
+    """The module name a document's name gives. xactflow-archidesc names a design <name>.design and the
+    component that holds it <name>.component, neither of them an identifier: the module is <name> (D45)."""
+    return name[: -len(suffix)] if name.endswith(suffix) and len(name) > len(suffix) else name
+
+
 def _check_identifier(name: str, what: str) -> None:
     if not _IDENTIFIER.fullmatch(name):
         raise ValueError(f"{what} {name!r} is not a valid SystemVerilog identifier")
@@ -571,7 +577,8 @@ def _check_linked(linked: LinkedDesign) -> None:
             if view.instance_name not in linked.instances:
                 raise ValueError(f"design configuration {configuration.vlnv} configures {view.instance_name!r}, which is not an instance of the design")
 
-    # link() drops an ad hoc reference it cannot resolve, without a diagnostic.
+    # link() leaves out an ad hoc reference it cannot resolve. Since XactFlow 0.4.0 it reports each one (SCR 13.5),
+    # which is refused above; this stays for a LinkedDesign put together another way.
     for connection in design.ad_hoc_connections:
         resolved = linked.ad_hoc_connections.get(connection.name, [])
         if len(resolved) != len(connection.internal_port_references):
@@ -711,6 +718,8 @@ def _view_holding_design(library: Library, component: ipxact.Component, vlnv: ip
 def _find_top_component(linked: LinkedDesign, top: Optional[str]) -> Optional[ipxact.Component]:
     """The hierarchical component whose view holds this design, if the library has one."""
     library, vlnv = linked.library, linked.vlnv
+    if top is None and linked.component is not None and _view_holding_design(library, linked.component, vlnv) is not None:
+        return linked.component  # the one link() was given, or the only one it found
     if top is not None:
         if not isinstance(top, str):
             raise TypeError(f"xactflow-rtl-gen: the top option is a VLNV as text, got {type(top).__name__}")
@@ -1234,7 +1243,7 @@ class _ModuleBuilder:
         self.abstraction_defaults: List[Tuple[_Block, _Assign]] = []  # what a tiedValue "default" may replace
         self.wires: Dict[str, str] = {}
         self.address_map: Optional[AddressMap] = None
-        self.module = linked.vlnv.name
+        self.module = _module_from(linked.vlnv.name, ".design")
         self.top = _Instance(self.module, self.module, [], {}, set(), lambda name: name)
 
     def build(self) -> str:
@@ -1285,7 +1294,10 @@ class _ModuleBuilder:
             return
         where = f"top component {component.vlnv}"
         view, instantiation = self.top_view, self.top_instantiation
-        self.module = instantiation.module_name if instantiation is not None and instantiation.module_name else component.vlnv.name
+        if instantiation is not None and instantiation.module_name:
+            self.module = instantiation.module_name
+        else:
+            self.module = _module_from(component.vlnv.name, ".component")
         if self.module_name:  # the version of it for one set of parameter values (D26)
             self.module = self.module_name
         _check_identifier(self.module, f"{where}: module name")
@@ -1342,7 +1354,10 @@ class _ModuleBuilder:
         ):
             raise ValueError(f"{where}: the design configuration selects view {view.name!r}, which instantiates nothing")
         instantiation = _component_instantiation(component, view, where)
-        module = instantiation.module_name if instantiation is not None and instantiation.module_name else component.vlnv.name
+        if instantiation is not None and instantiation.module_name:
+            module = instantiation.module_name
+        else:
+            module = _module_from(component.vlnv.name, ".component")
         _check_identifier(module, f"{where}: module name")
 
         overrides = {key: self._design_level(_text(value)) for key, value in linked_instance.source.component_ref.config_element_values.items()}
@@ -1638,7 +1653,9 @@ class _ModuleBuilder:
             (self.instances[e.instance.instance_name], e.bus_interface, {_text(p) for p in e.source.exclude_ports})
             for e in interconnection.endpoints
         ]
-        for hier in interconnection.hier_interfaces:
+        # As the design wrote them: link() resolves them against the component it found, and leaves out
+        # those it could not resolve, while the module's component is the one chosen here (D44).
+        for hier in interconnection.source.hier_interfaces:
             if self.top_component is None:
                 raise ValueError(f"{where}: a hierInterface needs a hierarchical component in the library, to say which ports it is")
             bus_interface = next((b for b in self.top_component.bus_interfaces if b.name == hier.bus_ref), None)
@@ -2345,6 +2362,11 @@ def _generate(
 ) -> None:
     _check_linked(linked)
     top_component = _find_top_component(linked, top)
+    if top_component is not None and linked.component is not top_component:
+        # link() checks hierInterfaces and external ports against the component holding the design, and finds
+        # that component only when the library has exactly one: give it the one chosen here (D44).
+        linked = link(linked.design, linked.library, linked.design_configuration, top_component)
+        _check_linked(linked)
     design_values: Dict[str, object] = {}
     configuration_values: Dict[str, object] = {}
     if top_component is not None:
@@ -2355,7 +2377,7 @@ def _generate(
             design_values = held.design_values
         # A configuration the top component holds applies at the top, as it does further down.
         if linked.design_configuration is None and held is not None and held.configuration is not None:
-            linked = link(linked.design, linked.library, held.configuration)
+            linked = link(linked.design, linked.library, held.configuration, top_component)
             _check_linked(linked)
         if held is not None and held.configuration_values:
             # Values for the configuration the component names, which may not be the one this was linked with.
@@ -2400,7 +2422,7 @@ def _generate(
         name = str(child.design.vlnv)
         if name in parents or name == str(linked.vlnv):
             raise ValueError(f"design {name} contains itself: {' -> '.join((*parents, str(linked.vlnv), name))}")
-        sub_linked = link(child.design, linked.library, child.configuration)
+        sub_linked = link(child.design, linked.library, child.configuration, child.component)
         _generate(
             sub_linked,
             common,

@@ -1,7 +1,7 @@
 __version__ = "0.2.0"
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Union
+from typing import List, Sequence, Union
 
 import ipxact
 from xactflow import Exporter, Library, LinkedDesign, link
@@ -21,15 +21,15 @@ class RtlExporter(Exporter):
     """Write the SystemVerilog of a design into output_dir: <module>.sv, plus an address map package
     if the design records address windows, and the modules of any hierarchical instances.
 
-    Accepts a LinkedDesign, or an ipxact.Design together with the `lib` option, which links it
-    first. A bare Design cannot be exported alone: it only holds VLNV references, not the ports
-    and port maps the wiring comes from.
+    Exports the ipxact.Design that is a target of the library: the file given to `xactflow rtl-gen`,
+    or the design an importer added. It is linked here against that library, which has to hold the
+    components and bus definitions the design refers to (the CLI's --lib). A design configuration
+    that is a target as well configures it (the CLI's --config). From Python, a LinkedDesign is
+    accepted in place of the library, for a design linked another way.
 
     Options:
       common: input port names to share across instances, as one top-level port each (clocks,
               resets). A comma-separated string or a list.
-      lib:    folders to scan for the design's library, when `subject` is an ipxact.Design. A
-              comma-separated string or a list.
       top:    the VLNV of the hierarchical component to take the module's name and ports from.
               Needed only when more than one component holds the design.
       unconnected: what to do with a port the design connects to nothing, in a module whose ports a
@@ -46,9 +46,13 @@ class RtlExporter(Exporter):
 
     name = "rtl-gen"
 
-    def export(self, subject: object, output_dir: Path, **options: object) -> None:
+    def export(self, library: Union[Library, LinkedDesign], output_dir: Path, **options: object) -> None:
         common = _names(options.pop("common", ()))
-        lib = options.pop("lib", None)
+        if "lib" in options:
+            raise TypeError(
+                "xactflow-rtl-gen: the lib option is gone. Since XactFlow 0.4 the library comes with the "
+                "export: give its folders to the command with --lib, or add the documents to the Library"
+            )
         top = options.pop("top", None)
         unconnected = options.pop("unconnected", "refuse")
         filelist = options.pop("filelist", None)
@@ -61,7 +65,7 @@ class RtlExporter(Exporter):
         ):
             raise TypeError(f"xactflow-rtl-gen: the filelist option is a file name in the output folder, got {filelist!r}")
 
-        files = generate_files(self._linked(subject, lib), common, top, unconnected, socgen_package, socgen_names)
+        files = generate_files(self._linked(library), common, top, unconnected, socgen_package, socgen_names)
         if filelist is not None:
             if filelist in files:
                 raise ValueError(f"the file list cannot be called {filelist}: a generated module has that file")
@@ -75,19 +79,26 @@ class RtlExporter(Exporter):
             (output_dir / name).write_text(text, encoding="utf-8")
 
     @staticmethod
-    def _linked(subject: object, lib: Optional[Union[str, Sequence[str]]]) -> LinkedDesign:
-        if isinstance(subject, LinkedDesign):
-            if lib is not None:
-                raise TypeError("xactflow-rtl-gen: the lib option only applies to an ipxact.Design")
-            return subject
-        if not isinstance(subject, ipxact.Design):
-            raise TypeError(f"xactflow-rtl-gen only supports LinkedDesign or ipxact.Design, got {type(subject).__name__}")
-        if lib is None:
+    def _linked(library: Union[Library, LinkedDesign]) -> LinkedDesign:
+        """The one design to export, linked against the library it came in (D44)."""
+        if isinstance(library, LinkedDesign):
+            return library
+        if not isinstance(library, Library):
             raise TypeError(
-                "xactflow-rtl-gen needs the design's library to export an ipxact.Design: "
-                "give it the lib option (--then-option lib=DIR)"
+                f"xactflow-rtl-gen exports the design that is a target of a Library, or a LinkedDesign, "
+                f"got {type(library).__name__}"
             )
-        return link(subject, Library.scan(*_names(lib)))
+        designs = list(library.targets(ipxact.Design))
+        if not designs:
+            raise TypeError("xactflow-rtl-gen needs an ipxact.Design target in the library")
+        if len(designs) > 1:
+            names = ", ".join(str(design.vlnv) for design in designs)
+            raise ValueError(f"xactflow-rtl-gen exports one design at a time, and the library has {len(designs)} as targets: {names}")
+        configurations = list(library.targets(ipxact.DesignConfiguration))
+        if len(configurations) > 1:
+            names = ", ".join(str(configuration.vlnv) for configuration in configurations)
+            raise ValueError(f"xactflow-rtl-gen takes one design configuration, and the library has {len(configurations)} as targets: {names}")
+        return link(designs[0], library, configurations[0] if configurations else None)
 
 
 _FORMER_MARKER = "// Generated by xactflow-rtl "  # its header under its former name, so that output can be regenerated (D30)

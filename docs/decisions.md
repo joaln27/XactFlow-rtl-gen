@@ -23,7 +23,7 @@ rounds are an adversarial AI agent attacking it.
   and when, is the author's call.
 
 ## D2. Generate from a linked design
-*2026-11-06 · active*
+*2026-11-06 · superseded by D44: what the exporter is handed. It still generates from a linked design*
 
 - **Decision:** the input is a `LinkedDesign` from `xactflow.link()`. A bare `ipxact.Design` is only
   accepted with the `lib` option, which links it first.
@@ -311,7 +311,7 @@ rounds are an adversarial AI agent attacking it.
   after 34, 28, 15, 4, 5, 4, 3 and 2 findings.
 
 ## D23. Pinned below XactFlow 0.4 while it uses a private function
-*2026-11-09 · active*
+*2026-11-09 · superseded by D46*
 
 - **Decision:** the package requires `xactflow>=0.3.0,<0.4`.
 - **Why:** the width and sign of a worked-out value come from `xactflow.expressions._evaluate`, which is private
@@ -752,3 +752,72 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** PeakRDL-socgen changes its package's layout (this is the layout of its 0.0.4), or IP-XACT
   address maps (`remapAddress` on a bridge's interfaces) replace the `addressMapping` extension and bring
   names with them.
+
+## D44. The design that is a target of the library, linked here
+*2026-11-12 · active · replaces D2*
+
+- **Decision:** `RtlExporter.export()` takes XactFlow 0.4's `Library` and exports the one `ipxact.Design` that
+  is a target of it, with the design configuration that is a target too, if there is one. It links the design
+  itself, against that library. No design among the targets raises `TypeError`, as the plugin convention asks;
+  more than one design, or more than one configuration, raises `ValueError`. From Python a `LinkedDesign` is
+  still accepted in place of the library. The `lib` option is gone, and using it says where the library comes
+  from now.
+- **Why:** XactFlow 0.4.0 changed what a plugin is handed. An importer adds its documents to a library as
+  targets, and the exporter gets that library, with what the CLI scanned from `--lib` in it. That answers the
+  report made from this plugin (XactFlow-archidesc issue 9): chained after an importer, an exporter had the
+  design and nothing to link it against. Every current plugin of the organisation needs 0.4, so this one could
+  no longer be installed next to any of them.
+- **The component that holds the design:** `link()` now resolves `hierInterface` and `externalPortReference`
+  elements against it. It finds that component only when the library has exactly one; with none or several it
+  warns and leaves those references out. So the exporter always gives `link()` the component the module is
+  generated for, the `top` option's or the only one there is, and the same for the design of each hierarchical
+  instance. A design linked from Python with a component given is generated for that one. The wiring still
+  reads the `hierInterface` elements as the design wrote them, so one `link()` left out cannot go missing
+  from a module.
+- **What `link()` reports now, and the exporter no longer has to:** an ad hoc reference to a port that does
+  not exist, inside or on the component (SCR 13.5), a `hierInterface` the component lacks, a design
+  configuration for a design the library lacks (SCR 1.5). Those refusals carry `link()`'s message. The
+  exporter's own ad hoc check stays, for a `LinkedDesign` put together another way. `link()` still does not
+  apply parameter overrides (D19, D25, D37).
+- **Designs that linked under 0.3 can be refused under 0.4**, since it checks more: over two interfaces on an
+  interconnection whose bus definition does not set `broadcast` (SCR 2.17), a `hierInterface` used by several
+  interconnections (SCR 2.3), and interface modes that may not meet across the hierarchy (SCR 2.4 to 2.10).
+  Four fixtures of the tests were such designs.
+- **Considered:** exporting every design among the targets, where two could write one module two ways;
+  taking a hierarchical component given alone and exporting the design of its view, left until a flow asks
+  for it; keeping `lib` as a second way to give the library, which the CLI's `--lib` now does for every
+  command.
+- **Revisit if:** an importer adds several designs at once, a flow gives the component and not the design,
+  or `link()` starts applying parameter overrides.
+
+## D45. A name with archidesc's suffix gives the module without it
+*2026-11-12 · active · the author's choice · next to D5*
+
+- **Decision:** where a module's name comes from a document's name, a component's `.component` and a design's
+  `.design` are left off: `soc.component`, and `soc.design` when no component holds it, both give module
+  `soc`. A `moduleName` on the view's component instantiation still comes first. Only that suffix, only on
+  that kind of document, and what is left has to be an identifier as before.
+- **Why:** `xactflow-archidesc` 0.3 names the design a script describes `<name>.design`, and builds the
+  component that holds it as `<name>.component`. Neither is a SystemVerilog identifier, so the flow on
+  XactFlow's slide, `archidesc` chained into this exporter, had no valid module name at all. The script's
+  `Design("…:soc:1.0")` names the SoC, and `soc` is the module its author expects.
+- **What comes with archidesc's component:** it always exists, and by D5 it defines the module's ports, from
+  the script's `add_port` and `add_bus`. A script that declares none gets a module with no ports: an instance
+  input it connects to nothing is refused by name, or left open with `unconnected=open` (D38), where it
+  became a port of the module before archidesc built a component. `common` shares only ports that component
+  has.
+- **Considered:** a `module` option, which every archidesc user would have to give; writing the dot as an
+  underscore, for a module called `soc_component`; and asking `xactflow-archidesc` to put a `moduleName` on
+  the component it builds, the standard's own place for the name, which this exporter already reads. The
+  last is worth proposing upstream, and this rule stops mattering the day it is there.
+- **Revisit if:** `xactflow-archidesc` writes a `moduleName` or changes how it names the two documents.
+
+## D46. Pinned below XactFlow 0.5, for the same private function
+*2026-11-12 · active · replaces D23*
+
+- **Decision:** the package requires `xactflow>=0.4.0,<0.5`, and its development extras the plugin releases
+  made for 0.4 (`xactflow-archidesc` 0.3.0, `xactflow-design` 0.2.1, `xactflow-sv` 0.2.1).
+- **Why:** D23's reason stands: width and sign still come from `xactflow.expressions._evaluate`. That file is
+  the same in 0.3.0 and 0.4.0. The lower bound moves because D44 uses what 0.4 brought: targets in a library
+  and the component given to `link()`.
+- **Revisit if:** as D23: XactFlow makes width and sign public; then use that and drop the upper bound.

@@ -111,7 +111,7 @@ def _rule(linked: LinkedDesign, module: str, top_component: Optional[ipxact.Comp
     width = _abstraction_width(linked, endpoint.bus_interface, view_of(endpoint.instance.instance_name))
     others = [e for e in connection.endpoints if e is not endpoint]
     outbound = [e for e in others if e.bus_interface.mode in _OUTBOUND]
-    hier = [h.bus_ref for h in connection.hier_interfaces]
+    hier = [h.bus_ref for h in connection.source.hier_interfaces]
     if outbound:  # at most one: link() checks that an interface of these modes only connects to targets
         decoder, target = outbound[0], this_end
     elif endpoint.bus_interface.mode in _OUTBOUND and (others or hier):

@@ -180,7 +180,10 @@ def test_a_value_in_a_configuration_sees_its_own_parameters(tmp_path):
 
 
 def test_a_configuration_for_another_design_is_refused():
-    refused("is for design .*other_d", design("soc", [instance("s", "seer")]), [plain_seer()], configuration=choose_view("rtl", "s", "other_d"))
+    soc = design("soc", [instance("s", "seer")])
+    refused("is for design .*other_d", soc, [plain_seer(), design("other_d", [])], configuration=choose_view("rtl", "s", "other_d"))
+    # one the library lacks is link()'s to report, since XactFlow 0.4.0
+    refused(r"SCR 1\.5.*other_d", soc, [plain_seer()], configuration=choose_view("rtl", "s", "other_d"))
 
 
 def test_a_configuration_naming_no_instance_is_refused():
@@ -832,7 +835,7 @@ def test_two_inouts_of_the_module_on_one_net_are_refused():
 
     top = hierarchical("chip", "chip_d", ports, [bus("u1", "target", port_map("PAD", "pad1")), bus("u2", "target", port_map("PAD", "pad2"))])
     chip_d = design("chip_d", [instance("s", "seeing_pad")], [interconnection("l", ("s", "b"), hier=["u1", "u2"])], [ad_hoc("b", ("s", "seen_o"), external=["o"])])
-    refused("two inouts of the module", chip_d, [top, seeing_pad()])
+    refused(r"SCR 2\.6.*hierInterface 'u1' .* to hierInterface 'u2'", chip_d, [top, seeing_pad()])  # link()'s, since XactFlow 0.4.0
 
 
 def test_an_inverted_inout_is_refused():
@@ -1653,7 +1656,7 @@ def test_a_window_among_targets_with_no_decoder_is_refused():
         [instance("a", "chosen"), instance("b", "chosen"), instance("c", "chosen")],
         [link_to("l", active(("a", "b")), active(("c", "b")), window(("b", "b"), 0x2000, 0x1000))],
     )
-    refused("cannot tell which of a.b, c.b", soc, [target_ip()])
+    refused(r"SCR 2\.10.*'l' has 0 driving interfaces", soc, [target_ip()])  # link()'s, since XactFlow 0.4.0
 
 
 def test_two_windows_behind_one_interface_get_their_own_constants():
@@ -1802,7 +1805,7 @@ def test_a_bus_that_does_not_say_its_width_is_not_held_to_another_buses_width():
 
 
 def test_a_window_on_the_decoders_own_side_of_a_hierarchical_interface():
-    chip = hierarchical("chip", "chip_d", [wire("f1", "out")], [bus("u1", "mirroredTarget", port_map("FLAG", "f1"))])
+    chip = hierarchical("chip", "chip_d", [wire("f1", "out")], [bus("u1", "initiator", port_map("FLAG", "f1"))])
     two_out = component("decoder", [wire("x_o", "out"), wire("y_o", "out")], [bus("m0", "initiator", port_map("FLAG", "x_o")), bus("m1", "initiator", port_map("FLAG", "y_o"))])
     chip_d = design("chip_d", [instance("dec", "decoder")])
     chip_d.interconnections = [

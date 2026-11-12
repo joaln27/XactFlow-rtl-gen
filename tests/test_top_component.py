@@ -155,13 +155,13 @@ def test_top_level_output_nothing_drives_is_refused():
 
 def test_external_port_the_component_lacks_is_refused():
     connections = [ad_hoc("a", ("s", "data_i"), external=["typo_i"])]
-    with pytest.raises(ValueError, match="chip has no port 'typo_i'"):
+    with pytest.raises(ValueError, match=r"SCR 13\.5.*externalPortReference portRef 'typo_i' does not match a port on component .*chip"):
         generate(design("chip_d", [instance("s", "replier")], ad_hocs=connections), [hierarchical("chip", "chip_d", IO), replier()])
 
 
 def test_hier_interface_the_component_lacks_is_refused():
     connection = interconnection("link", ("s", "b"), hier=["nope"])
-    with pytest.raises(ValueError, match="has no bus interface 'nope'"):
+    with pytest.raises(ValueError, match="hierInterface busRef 'nope' does not match a busInterface on component .*chip"):
         generate(design("chip_d", [instance("s", "replier")], [connection]), [hierarchical("chip", "chip_d", IO), replier()])
 
 
@@ -381,3 +381,77 @@ def test_exporter_writes_every_file_or_none(tmp_path):
     (tmp_path / "inner.sv").unlink()
     RtlExporter().export(linked, tmp_path, top="test.org:ip:chip:1.0")
     assert (tmp_path / "chip.sv").exists() and (tmp_path / "inner.sv").exists()
+
+
+# --- the component that holds the design, as link() takes it since XactFlow 0.4.0 (D44)
+
+
+def test_the_top_option_also_chooses_the_component_link_checks_against():
+    """With two components holding the design link() resolves no hierInterface by itself: it is given the one chosen."""
+    up = bus("up", "target", port_map("WORD", "in_i"), port_map("REPLY", "out_o"))
+    the_design = design("chip_d", [instance("s", "replier")], [interconnection("link", ("s", "b"), hier=["up"])])
+    documents = [hierarchical("chip_a", "chip_d", IO, [up]), hierarchical("chip_b", "chip_d", IO), replier()]
+    text = generate(the_design, documents, top="test.org:ip:chip_a:1.0")["chip_a.sv"]
+    assert "module chip_a (" in text and ".data_i (in_i)" in re.sub(r" +", " ", text)
+    with pytest.raises(ValueError, match="hierInterface busRef 'up' does not match a busInterface on component .*chip_b"):
+        generate(the_design, documents, top="test.org:ip:chip_b:1.0")
+
+
+def test_the_component_given_to_link_is_the_top_component_unless_the_top_option_names_another():
+    the_design = design("chip_d", [instance("s", "replier")], ad_hocs=wired())
+    chip_a, chip_b = hierarchical("chip_a", "chip_d", IO), hierarchical("chip_b", "chip_d", IO)
+    library = library_of([*bus_documents(), chip_a, chip_b, replier(), the_design])
+    assert "module chip_b (" in generate_top(link(the_design, library, component=chip_b))
+    assert "module chip_a (" in generate_top(link(the_design, library, component=chip_b), top="test.org:ip:chip_a:1.0")
+
+
+# --- names as xactflow-archidesc writes them: <name>.component holds <name>.design (D45)
+
+
+def test_a_component_named_with_the_suffix_gives_a_module_without_it():
+    top = hierarchical("chip.component", "chip.design", IO)
+    files = generate(design("chip.design", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])
+    assert list(files) == ["chip.sv"]
+    assert "module chip (" in files["chip.sv"]
+    assert slang_errors(files["chip.sv"], "module replier (input logic [7:0] data_i, output logic [7:0] reply_o); endmodule") == []
+
+
+def test_a_design_named_with_the_suffix_and_no_component_gives_a_module_without_it():
+    the_design = design("soc.design", [instance("m", "sender"), instance("s", "seer")], [interconnection("link", ("m", "b"), ("s", "b"))])
+    assert "module soc (" in generate(the_design, [sender(), seer()])["soc.sv"]
+
+
+def test_a_hierarchical_instance_named_with_the_suffix_is_the_module_without_it():
+    inner = hierarchical("inner.component", "inner.design", IO)
+    inner_design = design("inner.design", [instance("s", "replier")], ad_hocs=wired())
+    connections = [ad_hoc("a", ("i", "in_i"), external=["in_i"]), ad_hoc("b", ("i", "out_o"), external=["out_o"])]
+    documents = [hierarchical("chip.component", "chip.design", IO), inner, inner_design, replier()]
+    files = generate(design("chip.design", [instance("i", "inner.component")], ad_hocs=connections), documents)
+    assert list(files) == ["chip.sv", "inner.sv"]
+    assert "inner i (" in files["chip.sv"]
+    assert "module inner (" in files["inner.sv"]
+
+
+def test_the_module_name_of_the_view_comes_before_the_components_name():
+    top = hierarchical("chip.component", "chip.design", IO)
+    top.model.views[0].component_instantiation_ref = "named"
+    top.model.component_instantiations = [ipxact.ComponentInstantiation(name="named", module_name="chip_top")]
+    files = generate(design("chip.design", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])
+    assert list(files) == ["chip_top.sv"]
+
+
+@pytest.mark.parametrize(
+    "component_name, design_name, message",
+    [
+        ("chip.design", "chip_d", "module name 'chip.design' is not a valid SystemVerilog identifier"),  # a design's suffix on a component
+        ("a.b.component", "chip_d", "module name 'a.b' is not a valid SystemVerilog identifier"),
+        (".component", "chip_d", "module name '.component' is not a valid SystemVerilog identifier"),
+        (None, "chip.component", "design name 'chip.component' is not a valid SystemVerilog identifier"),
+        (None, ".design", "design name '.design' is not a valid SystemVerilog identifier"),
+    ],
+)
+def test_only_its_own_suffix_is_taken_off_a_name(component_name, design_name, message):
+    documents = [replier()] if component_name is None else [hierarchical(component_name, design_name, IO), replier()]
+    connections = [ad_hoc("b", ("s", "reply_o"), external=["out_o"])] if component_name else []
+    with pytest.raises(ValueError, match=re.escape(message)):
+        files_of(design(design_name, [instance("s", "replier")], ad_hocs=connections), documents, unconnected="open")
