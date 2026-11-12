@@ -787,6 +787,8 @@ rounds are an adversarial AI agent attacking it.
   taking a hierarchical component given alone and exporting the design of its view, left until a flow asks
   for it; keeping `lib` as a second way to give the library, which the CLI's `--lib` now does for every
   command.
+- **Version:** 0.3.0 with this, as what a user gives the exporter changed: the `lib` option went, and it
+  needs XactFlow 0.4.
 - **Revisit if:** an importer adds several designs at once, a flow gives the component and not the design,
   or `link()` starts applying parameter overrides.
 
