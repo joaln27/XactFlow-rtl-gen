@@ -851,5 +851,7 @@ rounds are an adversarial AI agent attacking it.
 - **Considered:** keeping D45 as a fallback, a rule about one importer inside the exporter for the
   libraries of a release that was the newest for two days; keeping only the design's half, which names a
   module quietly and differently from the script, as above.
+- **Version:** 0.4.0 with this, as a library that generated before can now be refused: one whose module was
+  named by the suffix rule.
 - **Revisit if:** `xactflow-archidesc` changes where it writes the module's name. When its release is out,
   raise the development extra to it and take the skip off the tests.
