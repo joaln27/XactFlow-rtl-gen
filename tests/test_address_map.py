@@ -10,6 +10,7 @@ from builders import (
     bus,
     bus_documents,
     component,
+    design_alone,
     has_icarus,
     has_verilator,
     library_of,
@@ -97,7 +98,7 @@ def soc(windows=(("m1", "second", 0x4000_1000, 0x2000), ("m0", "first", 0x4000_0
     for interface, target, base, size in windows:
         targets.setdefault(target, design.add_ip(target, "test.org:ip:chosen:1.0"))
         design.connect_bus(dec.bus(interface), targets[target], base_addr=base, size=size)
-    return link(design.build(), library)
+    return link(design_alone(design), library)
 
 
 def test_a_rule_table_cannot_go_to_a_module_generated_here():
@@ -220,7 +221,7 @@ def test_address_width_defaults_to_32_bits_and_grows_when_it_has_to():
         design = Design("test.org:design:soc:1.0", library)
         dec = design.add_ip("dec", "test.org:ip:decoder:1.0")
         design.connect_bus(dec.bus("m0"), design.add_ip("first", "test.org:ip:chosen:1.0"), base_addr=base, size=size)
-        return generate_files(link(design.build(), library))["soc_addr_map_pkg.sv"]
+        return generate_files(link(design_alone(design), library))["soc_addr_map_pkg.sv"]
 
     assert "logic [31:0] start_addr" in package_for(0x1000, 0x1000)
     assert "logic [63:0] start_addr" in package_for(0x1_0000_0000, 0x1000)

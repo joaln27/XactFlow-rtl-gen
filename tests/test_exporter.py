@@ -2,6 +2,7 @@
 
 import copy
 import dataclasses
+import inspect
 import shutil
 import subprocess
 
@@ -12,6 +13,7 @@ from xactflow.cli import main
 from xactflow_archidesc import Design
 from xactflow_design import DesignExporter
 
+from builders import design_alone
 from conftest import LIB, RTL
 from test_generated_rtl import slang_errors
 from xactflow_rtl_gen import RtlExporter, file_list, generate_top
@@ -80,7 +82,7 @@ def test_parameter_override_sets_the_width_of_the_top_level_port(soc, library):
 def test_unused_ports_of_a_design_without_overrides_keep_their_default_width(library):
     design = Design("test.org:design:plain:1.0", library)
     design.add_ip("s", "test.org:ip:slave:1.0")
-    text = generate_top(link(design.build(), library))
+    text = generate_top(link(design_alone(design), library))
     assert "output logic [7:0]  s_data_o" in text
     assert ".OUT_W(8)" in text  # the component's value, written rather than left to the HDL's default
 
@@ -90,7 +92,7 @@ def test_address_window_and_transforms_are_recorded_in_comments(library):
     master = design.add_ip("m", "test.org:ip:master:1.0", transforms=["tmrg"])
     slave = design.add_ip("s", "test.org:ip:slave:1.0")
     design.connect_bus(master, slave, base_addr=0x1000, size=0x100)
-    text = generate_top(link(design.build(), library))
+    text = generate_top(link(design_alone(design), library))
     assert "baseAddr 0x1000, size 0x100" in text
     assert "not applied here: tmrg" in text
 
@@ -166,14 +168,14 @@ def test_width_mismatch_is_refused_including_after_an_override(library):
     master = design.add_ip("m", "test.org:ip:master:1.0")
     slave = design.add_ip("s", "test.org:ip:slave:1.0", parameters={"OUT_W": 8})
     design.connect(slave.data_o, master.rdata_i)
-    assert "assign m_rdata_i = s_data_o;" in generate_top(link(design.build(), library))
+    assert "assign m_rdata_i = s_data_o;" in generate_top(link(design_alone(design), library))
 
     design = Design("test.org:design:bad:1.0", library)
     master = design.add_ip("m", "test.org:ip:master:1.0")
     slave = design.add_ip("s", "test.org:ip:slave:1.0", parameters={"OUT_W": 16})
     design.connect(slave.data_o, master.rdata_i)
     with pytest.raises(ValueError, match="width mismatch.*16 bits.*8 bits"):
-        generate_top(link(design.build(), library))
+        generate_top(link(design_alone(design), library))
 
 
 def test_an_input_driven_twice_is_refused(soc, library):
@@ -255,19 +257,19 @@ def test_unknown_common_port_is_refused(soc, library):
 def test_keyword_names_are_refused(library, name):
     design = Design(f"test.org:design:{name}:1.0", library)
     with pytest.raises(ValueError, match="SystemVerilog keyword"):
-        generate_top(link(design.build(), library))
+        generate_top(link(design_alone(design), library))
 
     design = Design("test.org:design:fine:1.0", library)
     design.add_ip(name, "test.org:ip:slave:1.0")
     with pytest.raises(ValueError, match="SystemVerilog keyword"):
-        generate_top(link(design.build(), library))
+        generate_top(link(design_alone(design), library))
 
 
 def test_name_with_characters_systemverilog_lacks_is_refused(library):
     design = Design("test.org:design:fine:1.0", library)
     design.add_ip("a.b", "test.org:ip:slave:1.0")
     with pytest.raises(ValueError, match="not a valid SystemVerilog identifier"):
-        generate_top(link(design.build(), library))
+        generate_top(link(design_alone(design), library))
 
 
 def set_direction(direction):
@@ -313,7 +315,7 @@ def test_phantom_port_gets_no_connection(library):
     library = changed_library(SLAVE, set_direction(ipxact.Direction.PHANTOM))
     design = Design("test.org:design:ph:1.0", library)
     design.add_ip("s", "test.org:ip:slave:1.0")
-    assert "irq_o" not in generate_top(link(design.build(), library))
+    assert "irq_o" not in generate_top(link(design_alone(design), library))
 
 
 def test_monitors_are_refused(soc, library):
@@ -372,7 +374,7 @@ def test_a_design_in_the_library_that_is_no_target_is_not_exported(soc, library)
 def test_two_designs_to_export_are_refused(soc, library):
     library.add(soc, target=True)
     library.add(dataclasses.replace(soc, vlnv=dataclasses.replace(soc.vlnv, name="other")), target=True)
-    with pytest.raises(ValueError, match="one design at a time, and the library has 2 as targets: .*soc.design.*other"):
+    with pytest.raises(ValueError, match="one design at a time, and the library has 2 as targets: .*design:soc:.*design:other:"):
         RtlExporter().export(library, "unused")
 
 
@@ -497,7 +499,7 @@ def test_unconnected_option_reaches_the_generation(soc, library, tmp_path):
 def test_cli_exporter_subcommand_on_a_design_file(soc, library, tmp_path, capsys):
     library.add(soc, target=True)
     DesignExporter().export(library, tmp_path)
-    design_file = tmp_path / "test.org_design_soc.design_1.0.xml"
+    design_file = tmp_path / "test.org_design_soc_1.0.xml"
     arguments = ["rtl-gen", str(design_file), "--lib", str(LIB), "--output", str(tmp_path / "rtl"), "--option", "common=clk_i,rst_ni"]
     assert main(arguments) == 0
     assert ".GAIN(5)" in (tmp_path / "rtl" / "soc.sv").read_text()
@@ -512,15 +514,23 @@ TOP_PORTS = (
 )
 
 
-def write_script(tmp_path, top_ports=TOP_PORTS):
-    """A design script as xactflow-archidesc 0.3 reads it: the component it builds, named soc.component,
-    defines the module's ports, so the script declares them."""
+# The component xactflow-archidesc builds names the module since the release after 0.3.0 (its issue 11). The
+# one 0.3.0 builds does not, and is refused for its own name, soc.component (D47).
+archidesc_names_the_module = pytest.mark.skipif(
+    "module_name" not in inspect.signature(Design).parameters,
+    reason="this xactflow-archidesc gives the component it builds no moduleName",
+)
+
+
+def write_script(tmp_path, top_ports=TOP_PORTS, design_arguments=""):
+    """A design script for xactflow-archidesc: the component it builds, soc.component, names the module and
+    defines its ports, so the script declares them."""
     script = tmp_path / "soc.py"
     script.write_text(
         "from xactflow import Library\n"
         "from xactflow_archidesc import Design\n"
         f"library = Library.scan({str(LIB)!r})\n"
-        "design = Design('test.org:design:soc:1.0', library)\n"
+        f"design = Design('test.org:design:soc:1.0', library{design_arguments})\n"
         "m = design.add_ip('m', 'test.org:ip:master:1.0')\n"
         "s = design.add_ip('s', 'test.org:ip:slave:1.0')\n"
         "design.connect_bus(m, s)\n"
@@ -529,13 +539,22 @@ def write_script(tmp_path, top_ports=TOP_PORTS):
     return script
 
 
+@archidesc_names_the_module
 def test_cli_chained_from_archidesc_as_on_the_slide(tmp_path):
     """The importer's design and component reach the exporter in the library that --lib scanned (D44)."""
     arguments = ["archidesc", str(write_script(tmp_path)), "--lib", str(LIB), "--then", "rtl-gen", "--output", str(tmp_path / "rtl")]
     assert main(arguments) == 0
-    text = (tmp_path / "rtl" / "soc.sv").read_text()  # soc, from soc.component (D45)
+    text = (tmp_path / "rtl" / "soc.sv").read_text()  # soc, the moduleName archidesc gives by default
     assert "module soc (" in text
     assert "input  logic clk_i" in text
+
+
+@archidesc_names_the_module
+def test_cli_chained_from_a_script_that_names_its_module(tmp_path):
+    script = write_script(tmp_path, design_arguments=", module_name='soc_top'")
+    assert main(["archidesc", str(script), "--lib", str(LIB), "--then", "rtl-gen", "--output", str(tmp_path / "rtl")]) == 0
+    assert [file.name for file in (tmp_path / "rtl").iterdir()] == ["soc_top.sv"]
+    assert "module soc_top (" in (tmp_path / "rtl" / "soc_top.sv").read_text()
 
 
 def test_cli_chained_without_the_library_gives_a_one_line_error(tmp_path, capsys):
@@ -553,6 +572,7 @@ def test_cli_chained_with_the_lib_option_of_before_says_where_it_went(tmp_path, 
     assert "'rtl-gen' cannot export the output of 'archidesc'" in capsys.readouterr().err.split("the lib option is gone")[0]
 
 
+@archidesc_names_the_module
 def test_cli_chained_from_a_script_that_declares_no_top_ports(tmp_path, capsys):
     """The component archidesc builds has no port then, and it defines the module's: an input left over is
     refused by name, or left open when asked (D38)."""

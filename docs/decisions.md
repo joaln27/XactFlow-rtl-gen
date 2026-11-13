@@ -793,7 +793,7 @@ rounds are an adversarial AI agent attacking it.
   or `link()` starts applying parameter overrides.
 
 ## D45. A name with archidesc's suffix gives the module without it
-*2026-11-12 · active · the author's choice · next to D5*
+*2026-11-12 · superseded by D47 on 2026-11-13 · the author's choice · next to D5*
 
 - **Decision:** where a module's name comes from a document's name, a component's `.component` and a design's
   `.design` are left off: `soc.component`, and `soc.design` when no component holds it, both give module
@@ -823,3 +823,33 @@ rounds are an adversarial AI agent attacking it.
   the same in 0.3.0 and 0.4.0. The lower bound moves because D44 uses what 0.4 brought: targets in a library
   and the component given to `link()`.
 - **Revisit if:** as D23: XactFlow makes width and sign public; then use that and drop the upper bound.
+
+## D47. A module's name is taken as it is written
+*2026-11-13 · active · the author's choice · replaces D45 · next to D5*
+
+- **Decision:** a module is called what the documents call it: the `moduleName` of the view's component
+  instantiation, else the component's name, else, for a design no component holds, the design's name.
+  Nothing is cut off a name. One that is no SystemVerilog identifier is refused as before, and the refusal
+  now says when it is a component's or a design's own name, so that what is missing can be read from it: a
+  `moduleName`, or the component.
+- **Why:** D45 was a workaround for `xactflow-archidesc` 0.3.0, whose component `<name>.component` named
+  no module. The proposal made from this plugin (XactFlow-archidesc issue 11) was taken the next day, in
+  its commit `631b599`: the component archidesc builds has a component instantiation with a `moduleName`,
+  the script's own name by default, or what `Design(..., module_name=)` gives. That is D45's "Revisit if".
+  With it the rule did nothing for a component. For archidesc's design given without its component it
+  still answered, with a name the script may not have asked for: `soc`, where the script said
+  `module_name="soc_top"`.
+- **What it costs:** a library written by `xactflow-archidesc` 0.3.0 is refused for the component's name,
+  `soc.component`, until a later archidesc builds it again. archidesc's design given alone is refused for
+  `soc.design`: the component names the module and defines its ports (D5), so it belongs in the library
+  with the design. From Python that is `build_component()` next to `build()`. Kactus2 calls a design
+  `<name>.design` too, and there a component always holds it and gives the module its name: the Didactic
+  SoC (D24) generates the same files as before.
+- **Until that archidesc is released:** on this day the change is on archidesc's main branch, and 0.3.0 is
+  the newest release. The tests that chain from archidesc are skipped where the installed one writes no
+  `moduleName`, and run by themselves once it does. All tests passed with `631b599` in place of 0.3.0.
+- **Considered:** keeping D45 as a fallback, a rule about one importer inside the exporter for the
+  libraries of a release that was the newest for two days; keeping only the design's half, which names a
+  module quietly and differently from the script, as above.
+- **Revisit if:** `xactflow-archidesc` changes where it writes the module's name. When its release is out,
+  raise the development extra to it and take the skip off the tests.

@@ -14,6 +14,7 @@ from builders import (
     bus_documents,
     component,
     design,
+    design_alone,
     has_icarus,
     has_verilator,
     hierarchical,
@@ -94,7 +95,7 @@ def chip(name="chip", windows=None, with_sub=False, buses=None):
         the_design.connect_bus(xbar.bus(interface), the_design.add_ip(target, "test.org:ip:leaf:1.0"), base_addr=base, size=size)
     if with_sub:
         the_design.add_ip("sub_i", "test.org:ip:sub:1.0")
-    return link(the_design.build(), library)
+    return link(design_alone(the_design), library)
 
 
 def package_of(linked=None, names=NAMES):

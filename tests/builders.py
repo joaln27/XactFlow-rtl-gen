@@ -1,5 +1,6 @@
 """Short ways to write the IP-XACT objects of a test, and to run generated RTL in real tools."""
 
+import dataclasses
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -154,13 +155,15 @@ def component(name, ports, buses=(), parameters=None, module=None, module_parame
     )
 
 
-def hierarchical(name, design_name, ports, buses=(), library="ip"):
-    """A component that holds a design: where the module's name and ports come from."""
+def hierarchical(name, design_name, ports, buses=(), library="ip", module=None):
+    """A component that holds a design: where the module's name and ports come from. With `module`, its view
+    also refers to a component instantiation that names the module, as xactflow-archidesc writes it."""
     return ipxact.Component(
         vlnv=ipxact.VLNV(VENDOR, library, name, "1.0"),
         bus_interfaces=list(buses),
         model=ipxact.Model(
-            views=[ipxact.View(name="structural", design_instantiation_ref="d")],
+            views=[ipxact.View(name="structural", component_instantiation_ref="m" if module else None, design_instantiation_ref="d")],
+            component_instantiations=[ipxact.ComponentInstantiation(name="m", module_name=module)] if module else [],
             design_instantiations=[ipxact.DesignInstantiation(name="d", design_ref=vlnv_ref("design", design_name))],
             ports=list(ports),
         ),
@@ -216,6 +219,17 @@ def design(name, instances, connections=(), ad_hocs=(), parameters=()):
         ad_hoc_connections=list(ad_hocs),
         parameters=list(parameters),
     )
+
+
+def design_alone(script) -> ipxact.Design:
+    """The design an xactflow-archidesc script describes, taken without the component archidesc builds for
+    it, under the name the script gave. archidesc calls the design <name>.design, because the module is named
+    by that component. A design that no component holds gives the module its own name (D47), so the cases
+    that want one built the short way name it here."""
+    built = script.build()
+    name = built.vlnv.name
+    assert name.endswith(".design"), name
+    return dataclasses.replace(built, vlnv=dataclasses.replace(built.vlnv, name=name[: -len(".design")]))
 
 
 def library_of(documents) -> Library:

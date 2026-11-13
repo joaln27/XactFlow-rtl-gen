@@ -405,53 +405,66 @@ def test_the_component_given_to_link_is_the_top_component_unless_the_top_option_
     assert "module chip_a (" in generate_top(link(the_design, library, component=chip_b), top="test.org:ip:chip_a:1.0")
 
 
-# --- names as xactflow-archidesc writes them: <name>.component holds <name>.design (D45)
+# --- where a module's name comes from: the view's moduleName, else the component's name, else the design's (D47)
 
 
-def test_a_component_named_with_the_suffix_gives_a_module_without_it():
-    top = hierarchical("chip.component", "chip.design", IO)
+def test_a_component_as_archidesc_builds_it_names_its_module():
+    """xactflow-archidesc calls the component <name>.component and the design <name>.design, and puts the
+    module's name on a component instantiation the view refers to, next to its design instantiation."""
+    top = hierarchical("chip.component", "chip.design", IO, module="chip")
     files = generate(design("chip.design", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])
     assert list(files) == ["chip.sv"]
     assert "module chip (" in files["chip.sv"]
     assert slang_errors(files["chip.sv"], "module replier (input logic [7:0] data_i, output logic [7:0] reply_o); endmodule") == []
 
 
-def test_a_design_named_with_the_suffix_and_no_component_gives_a_module_without_it():
-    the_design = design("soc.design", [instance("m", "sender"), instance("s", "seer")], [interconnection("link", ("m", "b"), ("s", "b"))])
-    assert "module soc (" in generate(the_design, [sender(), seer()])["soc.sv"]
-
-
-def test_a_hierarchical_instance_named_with_the_suffix_is_the_module_without_it():
-    inner = hierarchical("inner.component", "inner.design", IO)
+def test_a_hierarchical_instance_built_that_way_is_its_named_module():
+    inner = hierarchical("inner.component", "inner.design", IO, module="inner")
     inner_design = design("inner.design", [instance("s", "replier")], ad_hocs=wired())
     connections = [ad_hoc("a", ("i", "in_i"), external=["in_i"]), ad_hoc("b", ("i", "out_o"), external=["out_o"])]
-    documents = [hierarchical("chip.component", "chip.design", IO), inner, inner_design, replier()]
+    documents = [hierarchical("chip.component", "chip.design", IO, module="chip_top"), inner, inner_design, replier()]
     files = generate(design("chip.design", [instance("i", "inner.component")], ad_hocs=connections), documents)
-    assert list(files) == ["chip.sv", "inner.sv"]
-    assert "inner i (" in files["chip.sv"]
+    assert list(files) == ["chip_top.sv", "inner.sv"]
+    assert "inner i (" in files["chip_top.sv"]
     assert "module inner (" in files["inner.sv"]
 
 
 def test_the_module_name_of_the_view_comes_before_the_components_name():
-    top = hierarchical("chip.component", "chip.design", IO)
-    top.model.views[0].component_instantiation_ref = "named"
-    top.model.component_instantiations = [ipxact.ComponentInstantiation(name="named", module_name="chip_top")]
-    files = generate(design("chip.design", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])
+    top = hierarchical("chip", "chip_d", IO, module="chip_top")
+    files = generate(design("chip_d", [instance("s", "replier")], ad_hocs=wired()), [top, replier()])
     assert list(files) == ["chip_top.sv"]
 
 
+NO_MODULE_NAME = ": that is the component's name, used as no moduleName is given"
+NO_COMPONENT = ": that is the design's name, used as no component of the library holds the design"
+
+
 @pytest.mark.parametrize(
-    "component_name, design_name, message",
+    "component_name, module, design_name, message",
     [
-        ("chip.design", "chip_d", "module name 'chip.design' is not a valid SystemVerilog identifier"),  # a design's suffix on a component
-        ("a.b.component", "chip_d", "module name 'a.b' is not a valid SystemVerilog identifier"),
-        (".component", "chip_d", "module name '.component' is not a valid SystemVerilog identifier"),
-        (None, "chip.component", "design name 'chip.component' is not a valid SystemVerilog identifier"),
-        (None, ".design", "design name '.design' is not a valid SystemVerilog identifier"),
+        # A name is taken as it is written. Nothing is cut off one that xactflow-archidesc 0.3.0 wrote.
+        ("chip.component", None, "chip_d", "top component test.org:ip:chip.component:1.0: module name 'chip.component' is not a valid SystemVerilog identifier" + NO_MODULE_NAME),
+        ("a.b", None, "chip_d", "module name 'a.b' is not a valid SystemVerilog identifier" + NO_MODULE_NAME),
+        ("logic", None, "chip_d", "module name 'logic' is a SystemVerilog keyword" + NO_MODULE_NAME),
+        ("chip", "chip.top", "chip_d", "module name 'chip.top' is not a valid SystemVerilog identifier"),
+        ("chip", "logic", "chip_d", "module name 'logic' is a SystemVerilog keyword"),
+        (None, None, "chip.design", "design name 'chip.design' is not a valid SystemVerilog identifier" + NO_COMPONENT),
+        (None, None, "logic", "design name 'logic' is a SystemVerilog keyword" + NO_COMPONENT),
     ],
 )
-def test_only_its_own_suffix_is_taken_off_a_name(component_name, design_name, message):
-    documents = [replier()] if component_name is None else [hierarchical(component_name, design_name, IO), replier()]
+def test_a_name_that_is_no_identifier_is_refused_and_says_where_it_came_from(component_name, module, design_name, message):
+    documents = [replier()] if component_name is None else [hierarchical(component_name, design_name, IO, module=module), replier()]
     connections = [ad_hoc("b", ("s", "reply_o"), external=["out_o"])] if component_name else []
-    with pytest.raises(ValueError, match=re.escape(message)):
+    with pytest.raises(ValueError) as refusal:
         files_of(design(design_name, [instance("s", "replier")], ad_hocs=connections), documents, unconnected="open")
+    assert str(refusal.value).endswith(message)
+
+
+def test_an_instance_whose_component_gives_no_module_name_is_refused_by_name():
+    inner = hierarchical("inner.component", "inner.design", IO)
+    inner_design = design("inner.design", [instance("s", "replier")], ad_hocs=wired())
+    connections = [ad_hoc("a", ("i", "in_i"), external=["in_i"]), ad_hoc("b", ("i", "out_o"), external=["out_o"])]
+    documents = [hierarchical("chip", "chip_d", IO), inner, inner_design, replier()]
+    with pytest.raises(ValueError) as refusal:
+        generate(design("chip_d", [instance("i", "inner.component")], ad_hocs=connections), documents)
+    assert str(refusal.value) == "instance 'i': module name 'inner.component' is not a valid SystemVerilog identifier" + NO_MODULE_NAME

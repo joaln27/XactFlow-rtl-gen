@@ -4,6 +4,8 @@ import pytest
 from xactflow import Library
 from xactflow_archidesc import Design
 
+from builders import design_alone
+
 FIXTURES = Path(__file__).parent / "fixtures"
 LIB = FIXTURES / "lib"
 RTL = FIXTURES / "rtl"
@@ -22,4 +24,4 @@ def soc(library):
     slave = design.add_ip("s", "test.org:ip:slave:1.0", parameters={"GAIN": 5, "OUT_W": 16})
     design.connect_bus(master, slave, base_addr=0x4000_0000, size=0x1000)
     design.connect(slave.irq_o, master.irq_i)
-    return design.build()
+    return design_alone(design)

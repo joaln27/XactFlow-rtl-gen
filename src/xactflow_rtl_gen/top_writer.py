@@ -110,17 +110,16 @@ def _two_bounds(dimension: str) -> Optional[Tuple[str, str]]:
     return dimension[: found[0]].strip(), dimension[found[0] + 1 :].strip()
 
 
-def _module_from(name: str, suffix: str) -> str:
-    """The module name a document's name gives. xactflow-archidesc names a design <name>.design and the
-    component that holds it <name>.component, neither of them an identifier: the module is <name> (D45)."""
-    return name[: -len(suffix)] if name.endswith(suffix) and len(name) > len(suffix) else name
+# Where a module's name came from, when nothing in the documents names the module itself (D47).
+_NAMED_AFTER_COMPONENT = ": that is the component's name, used as no moduleName is given"
+_NAMED_AFTER_DESIGN = ": that is the design's name, used as no component of the library holds the design"
 
 
-def _check_identifier(name: str, what: str) -> None:
+def _check_identifier(name: str, what: str, note: str = "") -> None:
     if not _IDENTIFIER.fullmatch(name):
-        raise ValueError(f"{what} {name!r} is not a valid SystemVerilog identifier")
+        raise ValueError(f"{what} {name!r} is not a valid SystemVerilog identifier{note}")
     if name in SYSTEMVERILOG_KEYWORDS:
-        raise ValueError(f"{what} {name!r} is a SystemVerilog keyword")
+        raise ValueError(f"{what} {name!r} is a SystemVerilog keyword{note}")
 
 
 def _is_typed(parameter: ipxact.Parameter) -> bool:
@@ -1243,12 +1242,12 @@ class _ModuleBuilder:
         self.abstraction_defaults: List[Tuple[_Block, _Assign]] = []  # what a tiedValue "default" may replace
         self.wires: Dict[str, str] = {}
         self.address_map: Optional[AddressMap] = None
-        self.module = _module_from(linked.vlnv.name, ".design")
+        self.module = linked.vlnv.name  # until a component names the module
         self.top = _Instance(self.module, self.module, [], {}, set(), lambda name: name)
 
     def build(self) -> str:
         self._add_top_component()
-        _check_identifier(self.module, "design name")
+        _check_identifier(self.module, "design name", "" if self.top_component is not None else _NAMED_AFTER_DESIGN)
         for name in self.common:
             _check_identifier(name, "common port")
         self.address_map = build_address_map(
@@ -1294,13 +1293,11 @@ class _ModuleBuilder:
             return
         where = f"top component {component.vlnv}"
         view, instantiation = self.top_view, self.top_instantiation
-        if instantiation is not None and instantiation.module_name:
-            self.module = instantiation.module_name
-        else:
-            self.module = _module_from(component.vlnv.name, ".component")
+        named = instantiation is not None and bool(instantiation.module_name)
+        self.module = instantiation.module_name if named else component.vlnv.name
         if self.module_name:  # the version of it for one set of parameter values (D26)
             self.module = self.module_name
-        _check_identifier(self.module, f"{where}: module name")
+        _check_identifier(self.module, f"{where}: module name", "" if named else _NAMED_AFTER_COMPONENT)
         self.top.name = self.top.module = self.module
         self.top.view = view
         resolve = self.top_resolve
@@ -1354,11 +1351,9 @@ class _ModuleBuilder:
         ):
             raise ValueError(f"{where}: the design configuration selects view {view.name!r}, which instantiates nothing")
         instantiation = _component_instantiation(component, view, where)
-        if instantiation is not None and instantiation.module_name:
-            module = instantiation.module_name
-        else:
-            module = _module_from(component.vlnv.name, ".component")
-        _check_identifier(module, f"{where}: module name")
+        named = instantiation is not None and bool(instantiation.module_name)
+        module = instantiation.module_name if named else component.vlnv.name
+        _check_identifier(module, f"{where}: module name", "" if named else _NAMED_AFTER_COMPONENT)
 
         overrides = {key: self._design_level(_text(value)) for key, value in linked_instance.source.component_ref.config_element_values.items()}
         if configuration is not None:
