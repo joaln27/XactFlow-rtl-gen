@@ -80,6 +80,29 @@ for instance in design.instances():
 
 Like the generator, it raises `ValueError` for what it cannot work out. It is new in 0.4.0 and may still change.
 
+### The netlist by itself
+
+A module is a netlist before it is text: its parameters, ports and nets, the assigns of each connection, and
+its instances. `generate_netlists()` gives them by module name, for a printer of another language, or for
+reading what drives what without parsing SystemVerilog (D49):
+
+```python
+from xactflow_rtl_gen import generate_netlists, systemverilog
+from xactflow_rtl_gen.netlist import Constant
+
+for name, module in generate_netlists(linked, common=["clk_i", "rst_ni"]).items():
+    for block in module.blocks:                    # one for each connection of the design
+        for assign in block.assigns:
+            assign.sink                            # a net of the module, or a part of it
+            assign.source                          # the net that drives it, or a Constant: a number and a width
+    text = systemverilog.render(module)            # what generate_files() writes as <name>.sv
+```
+
+Its values are numbers and its parts of nets are ranges, with no text to parse. Three things in it are still
+as SystemVerilog and IP-XACT have them: a parameter's value is an expression, a type goes by the name the
+component gives it, and names were checked to be SystemVerilog identifiers. It is new in 0.4.0 and may still
+change.
+
 ### What it writes
 
 - `<module>.sv`: the design's module.
@@ -430,10 +453,14 @@ in `docs/decisions.md`). The scripts for these are kept outside this repository.
   instance that gives one another value.
 - `tests/test_elaboration.py` holds the elaboration by itself: views, values and hierarchy, with no module
   generated.
+- `tests/test_netlist.py` holds the netlist by itself, and that every scenario's SystemVerilog is its netlist
+  written out.
 
-The code is in three parts: `elaboration.py` chooses views, works out values and follows the hierarchy,
-`top_writer.py` turns each elaborated design into a module, and `expressions.py` holds what both need of
-expressions. `address_map.py` writes the address map packages.
+The code follows the three steps of a run. `elaboration.py` chooses views, works out values and follows the
+hierarchy. `wiring.py` decides what the module of each elaborated design is made of, as a netlist
+(`netlist.py`). `systemverilog.py` writes a netlist out. `top_writer.py` runs the three for a design and
+collects the files, `expressions.py` holds what they need of expressions, and `address_map.py` builds and
+writes the address map packages.
 
 Verilator and Icarus Verilog are skipped when not installed; slang always runs. CI installs both from Ubuntu's
 packages.

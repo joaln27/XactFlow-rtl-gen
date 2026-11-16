@@ -895,3 +895,40 @@ rounds are an adversarial AI agent attacking it.
   design configuration: this module then shrinks to what is left, or goes. Or another plugin starts using it,
   which is when its interface has to hold still. Or XactFlow makes width and sign public (D46), which
   `expressions.py` then uses.
+
+## D49. The netlist is apart from the text
+*2026-11-16 · active · the author's choice · changes where D48 left "ports, nets, assigns and text" · next to D4*
+
+- **Decision:** a module is first a netlist and then text. `wiring.py` decides what the module of an elaborated
+  design is made of, and gives a `netlist.Module`: its parameters, ports and nets, the assigns of each
+  connection, and its instances with their parameter values and port connections. `systemverilog.py` writes
+  one out and decides nothing. `top_writer.py` keeps what turns a design into files. `generate_netlists()`
+  gives the netlists of a design by module name, for anything that wants them before they are text.
+- **Why:** the generator's rules, which bit drives which, tie-offs, defaults, widths and every refusal, were
+  written in the same class as the SystemVerilog they came out as, so they could be used for nothing else: a
+  printer for another language, a comparison of two designs' connections, a report of what drives what. D48
+  took the elaboration out on one side. This takes the text out on the other, and what is left between them
+  is the wiring.
+- **What the netlist holds, and what a printer decides:** in the netlist a constant is a number and a width,
+  a part of a net is a range, an element or a member, a type is a name with its dimensions, and a port has
+  the direction the module declares. The printer decides how those are spelled: `4'ha`, `[7:4]`, `'1` for all
+  ones at a width only the compiler knows, the cast of a constant into a named type (D20), the `$error` and
+  `$fatal` of a check (D21, D36, D40), and a label for each check that the module's scope does not have yet.
+- **What is still SystemVerilog's in it, as it is IP-XACT's:** a parameter's value is an expression in that
+  syntax (D11). A type is called what the component's view calls it, with plain bits called `logic`, or `wire`
+  on a net that inouts share. And names are checked against SystemVerilog's identifiers and keywords while
+  wiring. A printer for another language has those three to translate, or to check again. The address map's
+  packages are still written by `address_map.py`, which already kept its data apart from its text.
+- **What did not change:** the output. The recording of D48 was made again: 711 calls of `generate_files()`
+  in the tests, refusals included, are the same text for text, and the three real SoCs (D13, D24) the same
+  byte for byte. No refusal changed place, as the netlist is made where the text was.
+- **Considered:** letting the printer read the wiring's own records, which carry what is driven and read next
+  to what is to be written, so that every printer would depend on how the wiring keeps its books; a netlist
+  with no word of SystemVerilog in it at all, values parsed into numbers and names left unchecked, which is
+  the work of the first printer that needs it; moving the address map's text into the printer too, left until
+  a second printer asks.
+- **Version:** unchanged, as for D48. `generate_netlists()` and `xactflow_rtl_gen.netlist` are new, and may
+  still move until something else uses them.
+- **Revisit if:** a second printer is written, which is when the three things above have to be settled. Or
+  the checks on real designs start reading the netlist where they now read the text back, which would make
+  its shape something to keep.

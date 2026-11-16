@@ -6,9 +6,10 @@ from typing import List, Sequence, Union
 import ipxact
 from xactflow import Exporter, Library, LinkedDesign, link
 
-from .top_writer import GENERATED_MARKER, file_list, generate_files, generate_top
+from .systemverilog import GENERATED_MARKER
+from .top_writer import file_list, generate_files, generate_netlists, generate_top
 
-__all__ = ["RtlExporter", "__version__", "file_list", "generate_files", "generate_top"]
+__all__ = ["RtlExporter", "__version__", "file_list", "generate_files", "generate_netlists", "generate_top"]
 
 
 def _names(value: Union[str, Sequence[str]]) -> List[str]:
