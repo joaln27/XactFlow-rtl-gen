@@ -62,6 +62,24 @@ files = generate_files(linked, common=["clk_i", "rst_ni"])  # file names and the
 RtlExporter().export(linked, "rtl", common="clk_i,rst_ni")
 ```
 
+### The elaboration by itself
+
+`link()` resolves the references of one design. Choosing each instance's view, applying parameter overrides
+and going into the designs of hierarchical instances is done in a module of its own, with no SystemVerilog in
+it, for other code that needs a design's values (D48):
+
+```python
+from xactflow_rtl_gen.elaboration import elaborate
+
+design = elaborate(link(document, library))
+for instance in design.instances():
+    instance.view, instance.instantiation     # as the design configuration selects them
+    instance.number("DATA_WIDTH")             # a parameter by its id, or any expression of the component
+    inside = design.descend(instance)         # the design in a hierarchical instance, elaborated for its values
+```
+
+Like the generator, it raises `ValueError` for what it cannot work out. It is new in 0.4.0 and may still change.
+
 ### What it writes
 
 - `<module>.sv`: the design's module.
@@ -410,6 +428,12 @@ in `docs/decisions.md`). The scripts for these are kept outside this repository.
   of them imported by `xactflow-sv` itself.
 - `tests/test_module_parameters.py` holds the parameters of a generated module, and that each tool refuses an
   instance that gives one another value.
+- `tests/test_elaboration.py` holds the elaboration by itself: views, values and hierarchy, with no module
+  generated.
+
+The code is in three parts: `elaboration.py` chooses views, works out values and follows the hierarchy,
+`top_writer.py` turns each elaborated design into a module, and `expressions.py` holds what both need of
+expressions. `address_map.py` writes the address map packages.
 
 Verilator and Icarus Verilog are skipped when not installed; slang always runs. CI installs both from Ubuntu's
 packages.

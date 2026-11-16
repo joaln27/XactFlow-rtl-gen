@@ -855,3 +855,43 @@ rounds are an adversarial AI agent attacking it.
   named by the suffix rule.
 - **Revisit if:** `xactflow-archidesc` changes where it writes the module's name. When its release is out,
   raise the development extra to it and take the skip off the tests.
+
+## D48. The elaboration is a module of its own, with an interface
+*2026-11-16 · active · the author's choice, after a review of how the exporter fits XactFlow*
+
+- **Decision:** what the generator worked out about a design before wiring it is now in `elaboration.py`,
+  behind an interface with no SystemVerilog module in it. `elaborate(linked)` gives an `ElaboratedDesign`: the
+  component that holds the design, its view, the design configuration that view names, and the scopes its
+  expressions are read in. `instances()` gives each instance with the view the design configuration selects
+  and its parameters' values in this design, and `descend(instance)` the design inside a hierarchical
+  instance, elaborated for that instance's values. What both sides need of expressions, a number or a value as
+  text, is in `expressions.py`. `top_writer.py` takes an elaborated design and keeps what makes it a module:
+  ports, nets, assigns and text.
+- **Why:** XactFlow's `link()` resolves the references of one design and stops there. It does not go into the
+  designs of instances (its README: "One level of hierarchy"), apply parameter overrides, or act on a design
+  configuration. The exporter had grown all of that inside the generator's one file (D12, D25, D26, D33, D37,
+  D44), where nothing else could use it and where it could not be read apart from the wiring. Another exporter
+  that needs a design's values, for documentation or a header or a file list, would have had to write it
+  again, and could then disagree with the RTL.
+- **What did not change:** the output. Everything `generate_files()` returned or refused in the tests was
+  recorded before and after, 710 calls with 206 refusals among them, and is the same text for text. The three
+  real SoCs (D13, D24) generate the same files byte for byte. The functions moved as they were written.
+- **One order that can differ:** an instance with two things wrong at once, a module name that is no
+  identifier and a value the design cannot work out, is now refused for the value first, as the elaboration
+  works out the values before the generator names a module. No test has such a design.
+- **What stays in the generator, on purpose:** which module parameters are written on an instance and how
+  (D10, D11, D19); the name of the module for a set of values (D26: the elaboration says which instances have
+  the same values, with `variant()`, and the generator names the modules); ports and the shapes of structs;
+  the rule count the address map gives a decoder, which is one more value for the instance (`with_values()`);
+  and the refusals that are the generator's own limits, such as monitor interconnections.
+- **Considered:** moving it into XactFlow, where it belongs if every plugin is to get an elaborated design:
+  that is its maintainers' to decide, and a module with an interface and tests is what can be offered to
+  them; a result with no expression text in it, which would have meant deciding again how values are written
+  (D11) with no design asking for it; leaving one file and only reordering it.
+- **Version:** unchanged. 0.4.0 is not released yet, and nothing a user gives the exporter or gets from it
+  changed. `xactflow_rtl_gen.elaboration` is new with it, and its interface may still move until another
+  tool uses it.
+- **Revisit if:** `link()` starts going into the designs of instances, applying overrides or acting on a
+  design configuration: this module then shrinks to what is left, or goes. Or another plugin starts using it,
+  which is when its interface has to hold still. Or XactFlow makes width and sign public (D46), which
+  `expressions.py` then uses.
