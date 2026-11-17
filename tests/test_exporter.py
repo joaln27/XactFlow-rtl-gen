@@ -2,7 +2,6 @@
 
 import copy
 import dataclasses
-import inspect
 import shutil
 import subprocess
 
@@ -514,12 +513,8 @@ TOP_PORTS = (
 )
 
 
-# The component xactflow-archidesc builds names the module since the release after 0.3.0 (its issue 11). The
-# one 0.3.0 builds does not, and is refused for its own name, soc.component (D47).
-archidesc_names_the_module = pytest.mark.skipif(
-    "module_name" not in inspect.signature(Design).parameters,
-    reason="this xactflow-archidesc gives the component it builds no moduleName",
-)
+# The component xactflow-archidesc builds names the module since its 0.3.1 (its issue 11), which the tests
+# chained from it need. The one 0.3.0 builds does not, and is refused for its own name, soc.component (D47).
 
 
 def write_script(tmp_path, top_ports=TOP_PORTS, design_arguments=""):
@@ -539,7 +534,6 @@ def write_script(tmp_path, top_ports=TOP_PORTS, design_arguments=""):
     return script
 
 
-@archidesc_names_the_module
 def test_cli_chained_from_archidesc_as_on_the_slide(tmp_path):
     """The importer's design and component reach the exporter in the library that --lib scanned (D44)."""
     arguments = ["archidesc", str(write_script(tmp_path)), "--lib", str(LIB), "--then", "rtl-gen", "--output", str(tmp_path / "rtl")]
@@ -549,7 +543,6 @@ def test_cli_chained_from_archidesc_as_on_the_slide(tmp_path):
     assert "input  logic clk_i" in text
 
 
-@archidesc_names_the_module
 def test_cli_chained_from_a_script_that_names_its_module(tmp_path):
     script = write_script(tmp_path, design_arguments=", module_name='soc_top'")
     assert main(["archidesc", str(script), "--lib", str(LIB), "--then", "rtl-gen", "--output", str(tmp_path / "rtl")]) == 0
@@ -572,7 +565,6 @@ def test_cli_chained_with_the_lib_option_of_before_says_where_it_went(tmp_path, 
     assert "'rtl-gen' cannot export the output of 'archidesc'" in capsys.readouterr().err.split("the lib option is gone")[0]
 
 
-@archidesc_names_the_module
 def test_cli_chained_from_a_script_that_declares_no_top_ports(tmp_path, capsys):
     """The component archidesc builds has no port then, and it defines the module's: an input left over is
     refused by name, or left open when asked (D38)."""

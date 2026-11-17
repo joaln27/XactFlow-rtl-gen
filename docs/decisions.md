@@ -855,6 +855,8 @@ rounds are an adversarial AI agent attacking it.
   named by the suffix rule.
 - **Revisit if:** `xactflow-archidesc` changes where it writes the module's name. When its release is out,
   raise the development extra to it and take the skip off the tests.
+- **Done on 2026-11-17:** `xactflow-archidesc` 0.3.1 has it, and is released. The development extra asks for
+  0.3.1, and the tests chained from archidesc run with no skip.
 
 ## D48. The elaboration is a module of its own, with an interface
 *2026-11-16 · active · the author's choice, after a review of how the exporter fits XactFlow*
