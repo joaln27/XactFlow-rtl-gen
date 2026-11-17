@@ -38,6 +38,7 @@ classifiers = [
 dev = [
     "pytest",
     "pyslang>=10.0.0",
+    "pyyaml",
     "xactflow-archidesc>=0.3.0",
     "xactflow-design>=0.2.1",
     "xactflow-sv>=0.2.1",

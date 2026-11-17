@@ -932,3 +932,43 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** a second printer is written, which is when the three things above have to be settled. Or
   the checks on real designs start reading the netlist where they now read the text back, which would make
   its shape something to keep.
+
+## D50. The two public SoCs run in CI, and the toolchain's main branch once a week
+*2026-11-17 · active · the author's choice · next to D22 and D24*
+
+- **Decision:** the checks on D24's two public SoCs, Croc and Didactic SoC, are in this repository, in
+  `tests/real_designs`, and run on every push and pull request at a pinned commit of each project
+  (`tests/test_real_designs.py`, the `real_designs` job of `build.yml`). The build, and so a release to PyPI,
+  waits for them. A second workflow, `upstream.yml`, runs every test and both SoCs once a week against the main
+  branch of each package of the XactFlow toolchain, with the exporter's own pins (D46) left aside.
+- **Why:** the checks lived outside the repository and were run by hand after a change, and part of them had
+  fallen behind. Since the port to XactFlow 0.4 (D44), Croc's library script still called the 0.3 importer, so
+  Croc was only regenerated from a library built before, and the `rtl-breaker` reproducers (D22) were not run
+  again; the 0.3.0 release and D47 went out like that. A check that has to be remembered is skipped when it
+  matters most, and one outside the repository nobody else can run. And a change upstream showed only when the
+  exporter was next upgraded, as XactFlow 0.4 did (D44).
+- **What is checked:** for Croc, that the library built from its RTL generates, that its testbench elaborates in
+  slang with the generated modules as with the hand-written ones, and that each of the 3769 bits traced has the
+  same driver and each of the 110 instance parameters the same value. For Didactic, that every bit of its eight
+  modules is driven as in the tops Kactus2 generated, but for the eight bits of `pmod_sel` its RTL lacks, and
+  that slang finds nothing in the generated modules against Didactic's RTL but the one inout its component
+  lacks. The numbers are those of the pinned commits, written into the test, so a change fails until it is
+  explained. Each check was made to fail once on purpose, by swapping two connections or misnaming a port in
+  the generated RTL.
+- **Not in CI:** Croc's firmware in Verilator (about 25 minutes for one build, and the trace already compares
+  every bit); a fresh run of Kactus2, which would have to be built; the first SoC (D13), whose sources are
+  not public; and the `rtl-breaker` reproducers and fuzzers, which are each round's working files, while the
+  findings fixed from them are tests in `test_adversarial.py`. Those were brought to the 0.4 importer the same
+  day and run again: the same results as on 2026-11-10, but for five hand-written designs that XactFlow 0.4's
+  link now refuses before the exporter sees them (SCR 1.5, 2.4, 2.6 and 2.8), two of which generated before.
+- **Ported on the way:** Croc's library script to `xactflow-sv` 0.2.1, whose importer adds its component to a
+  `Library`, and to exporters that write a library's targets. The library it writes is the one of 2026-11-10 but
+  for the writers' version and a `language` element `xactflow-component` 0.2.1 adds. The RTL of both SoCs is the
+  same as then but for the version in its first line.
+- **Considered:** cloning both projects at their latest commit each time, which would make a change of theirs
+  look like the exporter's; running the scripts from outside the repository, which nobody else could; storing
+  the generated RTL and comparing it byte for byte, which says that something changed but not whether it is
+  wrong, and would put files made from their sources in this repository.
+- **Revisit if:** a pinned commit has to move (the numbers move with it, see `tests/real_designs/README.md`), a
+  third public SoC joins under D24, or upstream's main breaks so often that a weekly failure stops being read.
+  GitHub turns a scheduled workflow off after 60 days with no activity in the repository.

@@ -52,9 +52,45 @@ jobs:
         run: pytest
 
 #-------------------------------------------------------------------------------
+  # Two SoCs the exporter did not grow up with, generated and checked against their own RTL (D24, D50):
+  # tests/test_real_designs.py. The commits are the ones its numbers were taken at; move them together.
+  real_designs:
+    name: Croc and Didactic SoC
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: pulp-platform/croc
+          ref: 71abd392bec14930292007cfb3a2cda2901bceeb
+          path: external/croc
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Edu4Chip/Didactic-SoC
+          ref: d67a723cd1af3d47df130e055c0b73770ab119d0
+          path: external/Didactic-SoC
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: python -m pip install ".[dev]"
+
+      - name: Test
+        run: pytest -v tests/test_real_designs.py
+        env:
+          CROC_DIR: external/croc
+          DIDACTIC_DIR: external/Didactic-SoC
+
+#-------------------------------------------------------------------------------
   build:
     needs:
       - test
+      - real_designs
     name: Build sdist and wheel
     runs-on: ubuntu-latest
 

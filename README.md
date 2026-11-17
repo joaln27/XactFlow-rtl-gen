@@ -421,7 +421,9 @@ Kactus2 also generates Verilog that does not compile if a top-level port is call
 ## Tried on real designs
 
 Besides its own tests, the exporter is run on whole SoCs, each chosen for a kind of input the others lack (D24
-in `docs/decisions.md`). The scripts for these are kept outside this repository.
+in `docs/decisions.md`). The two public ones are in `tests/real_designs`, and CI generates and checks both on
+every push, at pinned commits of each (D50). The first SoC the exporter was written with is not public, so its
+checks stay outside this repository.
 
 - **[Didactic SoC](https://github.com/Edu4Chip/Didactic-SoC)** (Edu4Chip): an IEEE 1685-2022 library made in
   Kactus2, with three levels of hierarchy and design configurations. All eight modules generate, and every bit
@@ -455,6 +457,9 @@ in `docs/decisions.md`). The scripts for these are kept outside this repository.
   generated.
 - `tests/test_netlist.py` holds the netlist by itself, and that every scenario's SystemVerilog is its netlist
   written out.
+- `tests/test_real_designs.py` generates Croc and Didactic SoC and checks them against their own RTL. It needs
+  clones of both, named by `CROC_DIR` and `DIDACTIC_DIR`, and is skipped without them
+  (`tests/real_designs/README.md`).
 
 The code follows the three steps of a run. `elaboration.py` chooses views, works out values and follows the
 hierarchy. `wiring.py` decides what the module of each elaborated design is made of, as a netlist
@@ -463,7 +468,8 @@ collects the files, `expressions.py` holds what they need of expressions, and `a
 writes the address map packages.
 
 Verilator and Icarus Verilog are skipped when not installed; slang always runs. CI installs both from Ubuntu's
-packages.
+packages. Once a week a second workflow, `upstream.yml`, runs all of it against the main branch of every
+package of the XactFlow toolchain, to see a change there before it is released.
 
 ## License
 

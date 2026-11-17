@@ -1,0 +1,63 @@
+name: upstream
+
+# Once a week, the tests and the two real SoCs against the main branch of every package of the toolchain, to
+# see what a change upstream does to the exporter before it is released (D50). The exporter's own pins are left
+# aside here, so a new version of XactFlow is tried too. A failure is a lead: what users install is what
+# build.yml tests, the released packages.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: against upstream main
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: pulp-platform/croc
+          ref: 71abd392bec14930292007cfb3a2cda2901bceeb
+          path: external/croc
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Edu4Chip/Didactic-SoC
+          ref: d67a723cd1af3d47df130e055c0b73770ab119d0
+          path: external/Didactic-SoC
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Verilator and Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends verilator iverilog
+
+      - name: Install the toolchain from its main branches
+        run: >
+          python -m pip install
+          "ipxact-compiler @ git+https://github.com/IP-XACT/ipxact-compiler@main"
+          "xactflow @ git+https://github.com/IP-XACT/XactFlow@main"
+          "xactflow-sv @ git+https://github.com/IP-XACT/XactFlow-sv@main"
+          "xactflow-archidesc @ git+https://github.com/IP-XACT/XactFlow-archidesc@main"
+          "xactflow-component @ git+https://github.com/IP-XACT/XactFlow-component@main"
+          "xactflow-design @ git+https://github.com/IP-XACT/XactFlow-design@main"
+
+      - name: Install the exporter without its pins
+        run: |
+          python -m pip install --no-deps .
+          python -m pip install pytest "pyslang>=10.0.0" pyyaml
+
+      - name: What was installed
+        run: |
+          python -m pip freeze | grep -i -E 'xactflow|ipxact'
+          python -m pip check || true
+
+      - name: Test
+        run: pytest
+        env:
+          CROC_DIR: external/croc
+          DIDACTIC_DIR: external/Didactic-SoC
