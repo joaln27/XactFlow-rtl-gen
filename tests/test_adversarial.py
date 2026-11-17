@@ -1684,6 +1684,7 @@ def test_interfaces_whose_constants_would_collide_are_refused():
         "decoder",
         [wire("x_o", "out"), wire("y_o", "out")],
         [bus("m0", "initiator", port_map("FLAG", "x_o")), bus("M0", "initiator", port_map("FLAG", "y_o"))],
+        parameters={"NUM_RULES": 1, "ADDR_RULES": 0},
     )
     soc = design(
         "soc",
@@ -1715,14 +1716,18 @@ def test_the_address_width_comes_from_the_views_abstraction():
     refused("past the 16-bit address space", one_window(0x20000, 0x1000), [decoder, target], choose_view("narrow", "a"), buses=[*documents, narrow])
 
 
-def test_an_instance_named_like_its_module_cannot_share_a_rule_table():
+def test_an_instance_named_like_its_module_has_the_only_table_under_that_name():
+    """A window reached through the module's own interface is in no table (D51), so nothing else is called SOC."""
     chip = hierarchical("soc", "soc_d", [wire("f", "in"), wire("x_o", "out")], [bus("up", "target", port_map("FLAG", "f"))])
     soc_d = design(
         "soc_d",
         [instance("soc", "decoder"), instance("a", "chosen"), instance("b", "chosen")],
         [link_to("l0", active(("soc", "m0")), window(("a", "b"), 0x1000, 0x1000)), ipxact.Interconnection(name="l1", active_interface=window(("b", "b"), 0x8000, 0x1000), hier_interfaces=[ipxact.HierInterface(bus_ref="up")])],
     )
-    refused("cannot tell their windows apart", soc_d, [chip, decoder_ip(), component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])])
+    files = files_of(soc_d, [chip, decoder_ip(), component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])], unconnected="open")
+    package = files["soc_addr_map_pkg.sv"]
+    assert "localparam int unsigned SOC_NUM_RULES = 1;" in package
+    assert "32'h00001000" in package and "32'h00008000" not in package
 
 
 def test_the_size_of_the_whole_address_space_is_not_zero():
@@ -1771,7 +1776,12 @@ def narrow_and_wide_buses(narrow_window):
             abstraction_types=[ipxact.AbstractionType(abstraction_ref=vlnv_ref("bus", "wbus_rtl"), port_maps=list(maps))],
         )
 
-    two_buses = component("decoder", [wire("x_o", "out"), wire("y_o", "out")], [bus("m0", "initiator", port_map("FLAG", "x_o")), wide_bus("m1", "initiator", port_map("FLAG", "y_o"))])
+    two_buses = component(
+        "decoder",
+        [wire("x_o", "out"), wire("y_o", "out")],
+        [bus("m0", "initiator", port_map("FLAG", "x_o")), wide_bus("m1", "initiator", port_map("FLAG", "y_o"))],
+        parameters={"NUM_RULES": 1, "ADDR_RULES": 0},
+    )
     wide_target = component("wide_target", [wire("sel_i", "in")], [wide_bus("b", "target", port_map("FLAG", "sel_i"))], module="chosen")
     soc = design(
         "soc",
@@ -1806,7 +1816,12 @@ def test_a_bus_that_does_not_say_its_width_is_not_held_to_another_buses_width():
 
 def test_a_window_on_the_decoders_own_side_of_a_hierarchical_interface():
     chip = hierarchical("chip", "chip_d", [wire("f1", "out")], [bus("u1", "initiator", port_map("FLAG", "f1"))])
-    two_out = component("decoder", [wire("x_o", "out"), wire("y_o", "out")], [bus("m0", "initiator", port_map("FLAG", "x_o")), bus("m1", "initiator", port_map("FLAG", "y_o"))])
+    two_out = component(
+        "decoder",
+        [wire("x_o", "out"), wire("y_o", "out")],
+        [bus("m0", "initiator", port_map("FLAG", "x_o")), bus("m1", "initiator", port_map("FLAG", "y_o"))],
+        parameters={"NUM_RULES": 1, "ADDR_RULES": 0},
+    )
     chip_d = design("chip_d", [instance("dec", "decoder")])
     chip_d.interconnections = [
         ipxact.Interconnection(name="l", active_interface=window(("dec", "m1"), 0x1000, 0x1000), hier_interfaces=[ipxact.HierInterface(bus_ref="u1")])
@@ -1816,7 +1831,8 @@ def test_a_window_on_the_decoders_own_side_of_a_hierarchical_interface():
     assert "{32'd1, 32'h00001000, 32'h00002000}" in package
 
 
-def test_windows_reached_from_outside_are_counted_by_the_modules_own_interfaces():
+def test_windows_reached_from_outside_the_module_are_in_no_table():
+    """What decodes them is in the design that instantiates this module, which has its own windows (D51)."""
     chip = hierarchical(
         "chip", "chip_d", [wire("f1", "in"), wire("f2", "in")], [bus("u1", "target", port_map("FLAG", "f1")), bus("u2", "target", port_map("FLAG", "f2"))]
     )
@@ -1825,9 +1841,30 @@ def test_windows_reached_from_outside_are_counted_by_the_modules_own_interfaces(
         ipxact.Interconnection(name="l1", active_interface=window(("a", "b"), 0x1000, 0x1000), hier_interfaces=[ipxact.HierInterface(bus_ref="u1")]),
         ipxact.Interconnection(name="l2", active_interface=window(("b", "b"), 0x2000, 0x1000), hier_interfaces=[ipxact.HierInterface(bus_ref="u2")]),
     ]
-    package = files_of(chip_d, [chip, component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])])["chip_addr_map_pkg.sv"]
-    assert "// Reached from outside chip" in package
-    assert "{32'd1, 32'h00002000, 32'h00003000}" in package
+    files = files_of(chip_d, [chip, component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])])
+    assert sorted(files) == ["chip.sv"]
+    assert "a.b address window: baseAddr 0x1000, size 0x1000" in files["chip.sv"]  # still said where it is connected
+
+
+def test_a_decoder_fed_through_the_modules_own_interface_keeps_its_table():
+    """A subsystem with a decoder inside: the addresses come in through the module, and the instance decodes them."""
+    router = component(
+        "router",
+        [wire("req_i", "in"), wire("x_o", "out"), wire("y_o", "out")],
+        [bus("s", "target", port_map("FLAG", "req_i")), bus("m0", "initiator", port_map("FLAG", "x_o")), bus("m1", "initiator", port_map("FLAG", "y_o"))],
+    )
+    chip = hierarchical("chip", "chip_d", [wire("f", "in")], [bus("up", "target", port_map("FLAG", "f"))])
+    chip_d = design(
+        "chip_d",
+        [instance("dec", "router"), instance("a", "chosen"), instance("b", "chosen")],
+        [
+            ipxact.Interconnection(name="in", active_interface=active(("dec", "s")), hier_interfaces=[ipxact.HierInterface(bus_ref="up")]),
+            link_to("l0", active(("dec", "m0")), window(("a", "b"), 0x1000, 0x1000)),
+            link_to("l1", active(("dec", "m1")), window(("b", "b"), 0x2000, 0x1000)),
+        ],
+    )
+    package = files_of(chip_d, [chip, router, component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])])["chip_addr_map_pkg.sv"]
+    assert "localparam int unsigned DEC_NUM_RULES = 2;" in package
 
 
 # --- an unpacked array port of an instance can be left open

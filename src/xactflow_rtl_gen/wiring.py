@@ -694,7 +694,7 @@ class ModuleBuilder:
         for name in self.common:
             _check_identifier(name, "common port")
         self.address_map = build_address_map(
-            self.linked, self.module, self.top_component, lambda name: self.elaborated.configured_view(self.linked.instances[name])[0]
+            self.linked, self.module, lambda name: self.elaborated.configured_view(self.linked.instances[name])[0]
         )
         for instance in self.linked.instances.values():
             self._add_instance(instance)

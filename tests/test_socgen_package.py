@@ -57,10 +57,12 @@ def leaf():
 
 
 def decoder():
+    """A decoder nothing brings addresses to: it is one because its module takes the rule table (D51)."""
     return component(
         "decoder",
         [wire("addr_i", "in", 32), wire("sel_o", "out", 2)],
         [bus(f"m{i}", "initiator", port_map("FLAG", "sel_o", select=(i, i))) for i in range(2)],
+        parameters={"NUM_RULES": 1, "ADDR_RULES": 0},
     )
 
 
@@ -217,7 +219,7 @@ def test_two_windows_with_one_name_are_refused():
 
 
 def test_a_design_with_no_window_is_refused():
-    with pytest.raises(ValueError, match="no module generated here has an address window"):
+    with pytest.raises(ValueError, match="no module generated here has a decoder with an address window"):
         package_of(chip(windows=(("m0", "ram_i", None, None),)), names={})
 
 
@@ -228,7 +230,7 @@ def test_an_address_map_wider_than_32_bits_is_refused():
         package_of(chip(windows=(("m0", "ram_i", 0x1_0000_0000, 0x1000),), buses=no_address_port))
 
 
-def test_windows_reached_from_outside_the_module_are_refused():
+def test_windows_reached_from_outside_the_module_are_not_a_decoders():
     inside = design(
         "outside_d",
         [instance("t", "leaf")],
@@ -243,8 +245,8 @@ def test_windows_reached_from_outside_the_module_are_refused():
     )
     holder = hierarchical("outside", "outside_d", [wire("sel_i", "in"), wire("seen_o", "out")], [bus("b", "target", port_map("FLAG", "sel_i"))])
     linked = link(inside, library_of([*bus_documents(), leaf(), inside, holder]))
-    assert "outside_addr_map_pkg.sv" in generate_files(linked)
-    with pytest.raises(ValueError, match="windows reached from outside it, through its own interfaces, have no place in the socgen package"):
+    assert sorted(generate_files(linked)) == ["outside.sv"]  # no package of its own either (D51)
+    with pytest.raises(ValueError, match="no module generated here has a decoder with an address window"):
         generate_files(linked, socgen_package=PACKAGE)
 
 

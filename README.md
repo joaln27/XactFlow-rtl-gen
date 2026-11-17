@@ -106,7 +106,8 @@ change.
 ### What it writes
 
 - `<module>.sv`: the design's module.
-- `<module>_addr_map_pkg.sv`: its address map, if the design records address windows. Compile it first.
+- `<module>_addr_map_pkg.sv`: its address map, if an instance of the design decodes address windows (see
+  [Address map](#address-map)). Compile it first.
 - One more `<module>.sv` for each hierarchical instance, at any depth.
 - With the `filelist` option, a list of those files in an order that compiles.
 - With the `socgen_package` option, one more package: every module's windows in PeakRDL-socgen's layout.
@@ -255,7 +256,14 @@ ports those are.
 ## Address map
 
 `archidesc`'s `connect_bus(..., base_addr=, size=)` records a window on the connection. The package holds
-those windows as constants, and one rule table for each instance that decodes them:
+the windows as constants, and one rule table for each decoder, an instance that addresses pass through (D51):
+it has windows behind its `initiator` or `mirroredTarget` interfaces, and something is connected to one of
+its `target` or `mirroredInitiator` interfaces, or its module declares `ADDR_RULES` or `NUM_RULES`.
+
+A window on anything else is in no table: on a master wired straight to a peripheral, and on a connection to
+one of the module's own interfaces, which is decoded in the design that instantiates the module. A design
+with no decoder, such as a subsystem around a few IPs or a single IP, gets no package. Each window is still
+said in the module, in the comment of its connection.
 
 ```systemverilog
     localparam int unsigned DEC_NUM_RULES = 2;
@@ -269,8 +277,6 @@ those windows as constants, and one rule table for each instance that decodes th
 - A rule's `idx` is which interface of the decoder the window is behind, counted in the order the component
   declares them, among its `initiator` and `mirroredTarget` interfaces, whatever order the script connected
   them in. On a bus with several ends, the decoder is the end with one of those modes.
-- A window reached through one of the module's own interfaces is listed under the module, with `idx`
-  counting the hierarchical component's interfaces.
 - Each window has `_BASE`, `_END` and `_SIZE` constants, named after the decoder and interface, and the target
   too when one interface reaches several windows.
 - `addr_rule_t` has the same fields as PULP's `axi_pkg::xbar_rule_32_t`, and the same meaning: the end is
@@ -310,8 +316,8 @@ the run generates, the top first. The modules themselves keep using their own pa
   base of the subsystem, which is the same when its first window is at offset 0.
 - `<INTC>_ADDR_RULES` holds the windows in `addr_map_rule_t`, three 32-bit fields `idx`, `start_addr` and
   `end_addr`, the first window in the highest element as in socgen's.
-- Its addresses are 32 bits, so a wider address map is refused, and so is a window reached from outside the
-  module, which socgen's layout has no place for.
+- Its addresses are 32 bits, so a wider address map is refused. It is refused too when no module of the run
+  has a decoder, as there is nothing to write.
 
 ## What it refuses
 

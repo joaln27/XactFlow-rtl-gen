@@ -77,7 +77,7 @@ rounds are an adversarial AI agent attacking it.
   it turned out to contradict the standard (D8).
 
 ## D7. An address map package for existing decoders, not a generated crossbar
-*2026-11-06 · active*
+*2026-11-06 · active · which instance is a decoder is D51's*
 
 - **Decision:** windows recorded by `archidesc` become a package. It holds constants per window and one rule
   table per decoder, `{idx, start, end}` with an exclusive end and 0 meaning the end of the address space,
@@ -972,3 +972,42 @@ rounds are an adversarial AI agent attacking it.
 - **Revisit if:** a pinned commit has to move (the numbers move with it, see `tests/real_designs/README.md`), a
   third public SoC joins under D24, or upstream's main breaks so often that a weekly failure stops being read.
   GitHub turns a scheduled workflow off after 60 days with no activity in the repository.
+
+## D51. The address map is for the instances that decode, and a design with none has no package
+*2026-11-17 · active · the author's choice, among three · narrows D7, and changes D43's refusal*
+
+- **Decision:** a rule table is written for a decoder only, and a decoder is an instance that addresses pass
+  through: it has windows behind the interfaces that send addresses out (`initiator`, `mirroredTarget`), and
+  either something is connected to one of the interfaces that take them in (`target`, `mirroredInitiator`), or
+  its module declares `ADDR_RULES` or `NUM_RULES` (D7). A window on anything else is in no table: one on an
+  initiator wired straight to a target, and one on a connection to the module's own interface. A design with
+  no decoder has no `<module>_addr_map_pkg.sv`.
+- **Why:** the package was written whenever a connection recorded a window, and that turned out wrong when the
+  exporter was tried on subsystems and single IPs: a module around a few peripherals, or around one, got an
+  address map package although nothing in it decodes an address and nothing reads the package. D7 already
+  called it a package "for existing decoders"; what a decoder is was never said, and every instance on the
+  sending side of a window counted as one. A window reached through the module's own interface was listed
+  under the module itself, in a table no generated module can take: what decodes it is an instance of the
+  design that instantiates the module, which has its own windows for it.
+- **What stays:** every window is still read, so one with no size, or one that is no number, is refused
+  wherever it is. Each is still said in the module, in the comment of its connection. Overlap and the end of
+  the address space are checked for the windows of a decoder, as they are what a table is made of. A design
+  with a decoder generates as before: the first SoC (D13), which has decoders at its top and in a subsystem,
+  is the same byte for byte. Of 753 recorded calls of `generate_files()` in the tests, 711 are the same and 28
+  lost only a package nothing used, all on the tests' design of a master wired to a target; the rest are of
+  the tests changed with the rule.
+- **What changed with it:** an instance with the name of its module is no longer refused, as the module has no
+  table of its own to confuse it with. The package in PeakRDL-socgen's layout (D43) no longer refuses a window
+  reached from outside, which is in no table now; it is refused when no module of the run has a decoder.
+- **Considered:** writing the package only when the module names it, in a parameter it gives a decoder: the
+  simplest rule, but a SoC whose interconnect is not given the table would lose its package, as the XactFlow
+  author's example would, and with it the constants an override (D7) or a testbench names. An option to turn
+  the package off,
+  with the default as it was: every flow would have to pass it for every subsystem and IP, to get what should
+  be the default.
+- **Version:** unchanged, 0.4.0 is not released yet. Against 0.3.0 a design whose only windows are on a plain
+  master or on its own interfaces stops getting a package.
+- **Revisit if:** a decoder turns up that nothing is connected to and that takes its table by an override
+  rather than by `ADDR_RULES`: its package would be missing, and the rule would need a way to name it. Or
+  standard address spaces and memory maps replace the `addressMapping` extension (D43), which say by
+  themselves what decodes.

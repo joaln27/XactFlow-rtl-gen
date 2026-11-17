@@ -132,23 +132,79 @@ def test_decoder_that_declares_the_parameters_is_given_the_table():
     assert ".ADDR_RULES(soc_addr_map_pkg::DEC_ADDR_RULES)" in text
 
 
-def test_decoder_without_the_parameters_is_left_alone():
-    plain = component(
-        "decoder",
-        [wire("addr_i", "in", 32), wire("sel_o", "out", 2)],
+def test_design_without_windows_has_no_package():
+    files = generate_files(soc(windows=()))
+    assert list(files) == ["soc.sv"]
+
+
+# --- which instance is a decoder (D51)
+
+
+def plain_decoder():
+    """A decoder whose module takes no rule table: one interface takes addresses in, and two send them out."""
+    return component(
+        "plain_decoder",
+        [wire("addr_i", "in", 32), wire("req_i", "in"), wire("sel_o", "out", 2)],
         [
+            bus("s", "target", port_map("FLAG", "req_i")),
             bus("m0", "initiator", port_map("FLAG", "sel_o", select=(0, 0))),
             bus("m1", "initiator", port_map("FLAG", "sel_o", select=(1, 1))),
         ],
     )
-    files = generate_files(soc(documents=[plain, chosen()]))
-    assert "soc_addr_map_pkg.sv" in files
+
+
+def host():
+    return component("host", [wire("req_o", "out")], [bus("h", "initiator", port_map("FLAG", "req_o"))])
+
+
+def soc_with(decoders=None, hosted=(), straight=(), size=0x1000):
+    """`decoders` maps an instance to its component's name, each with one window at 0x4000_0000 behind its m0.
+    Those in `hosted` have a host connected to their interface s. Each name in `straight` is a host wired to
+    a target of its own, with a window on that connection."""
+    library = library_of([*bus_documents(), decoder(), plain_decoder(), chosen(), host()])
+    design = Design("test.org:design:soc:1.0", library)
+    for name, kind in (decoders or {}).items():
+        instance = design.add_ip(name, f"test.org:ip:{kind}:1.0")
+        if name in hosted:
+            design.connect_bus(design.add_ip(f"{name}_host", "test.org:ip:host:1.0"), instance.bus("s"))
+        design.connect_bus(instance.bus("m0"), design.add_ip(f"{name}_target", "test.org:ip:chosen:1.0"), base_addr=0x4000_0000, size=size)
+    for name in straight:
+        design.connect_bus(design.add_ip(name, "test.org:ip:host:1.0"), design.add_ip(f"{name}_target", "test.org:ip:chosen:1.0"), base_addr=0x8000, size=size)
+    return link(design_alone(design), library)
+
+
+def test_a_decoder_is_an_instance_that_addresses_pass_through():
+    """Its module takes no rule table, so the instance is left alone, and the package is there to point it at."""
+    files = generate_files(soc_with({"dec": "plain_decoder"}, hosted=["dec"]))
+    assert list(files) == ["soc.sv", "soc_addr_map_pkg.sv"]
+    assert "localparam int unsigned DEC_NUM_RULES = 1;" in files["soc_addr_map_pkg.sv"]
     assert "#(" not in files["soc.sv"]
 
 
-def test_design_without_windows_has_no_package():
-    files = generate_files(soc(windows=()))
+def test_an_instance_that_declares_the_table_is_a_decoder_with_nothing_connected_to_it():
+    files = generate_files(soc_with({"dec": "decoder"}))
+    assert ".ADDR_RULES(soc_addr_map_pkg::DEC_ADDR_RULES)" in files["soc.sv"]
+
+
+def test_an_instance_no_address_comes_into_is_no_decoder():
+    files = generate_files(soc_with({"dec": "plain_decoder"}))
     assert list(files) == ["soc.sv"]
+    assert "dec_target.b address window: baseAddr 0x40000000, size 0x1000" in files["soc.sv"]  # still said in the module
+
+
+def test_a_master_wired_straight_to_a_target_has_no_package():
+    assert list(generate_files(soc_with(straight=["cpu"]))) == ["soc.sv"]
+
+
+def test_only_the_decoders_of_a_design_have_a_table():
+    package = generate_files(soc_with({"dec": "plain_decoder"}, hosted=["dec"], straight=["cpu"]))["soc_addr_map_pkg.sv"]
+    assert "// Decoded by dec\n" in package
+    assert "CPU" not in package and "32'h00008000" not in package
+
+
+def test_a_window_in_no_table_is_still_read():
+    with pytest.raises(ValueError, match="the address window of cpu_target.b needs both baseAddr and size"):
+        generate_files(soc_with(straight=["cpu"], size=None))
 
 
 def test_compiles_with_slang():

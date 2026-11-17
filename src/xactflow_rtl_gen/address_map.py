@@ -2,6 +2,11 @@
 
 The rule shape, an index with a start address and an exclusive end address, is the one PULP's
 crossbars and common_cells' addr_decode take, so a table can be handed to them directly.
+
+A decoder is an instance that addresses pass through (D51): it has windows behind its interfaces that send
+addresses out, and something connects to one that takes them in, or it declares ADDR_RULES or NUM_RULES. A
+window on anything else, an initiator wired straight to a target or the module's own interface, is in no
+table, and a design with no decoder has no package.
 """
 
 from __future__ import annotations
@@ -48,7 +53,6 @@ class Rule:
     size: int
     width: Optional[int] = None  # of this window's own bus, when its abstraction says
     name: str = ""  # what its constants are called
-    from_outside: bool = False  # reached through the module's own interface, not decoded by an instance
 
     @property
     def end(self) -> int:
@@ -95,7 +99,9 @@ def _index_of(interface: ipxact.BusInterface, component: ipxact.Component) -> in
     return [b.name for b in component.bus_interfaces if b.mode in modes].index(interface.name)
 
 
-def _rule(linked: LinkedDesign, module: str, top_component: Optional[ipxact.Component], view_of: Callable, connection, endpoint) -> Rule:
+def _rule(linked: LinkedDesign, module: str, view_of: Callable, connection, endpoint) -> Optional[Rule]:
+    """The window recorded on one end of a connection, under the instance on the side that sends the address.
+    None for a window reached through one of the module's own interfaces: nothing in the module decodes it."""
     where = f"interconnection {connection.name!r}"
     this_end = f"{endpoint.instance.instance_name}.{endpoint.bus_interface.name}"
     window = address_window(endpoint.source)
@@ -121,10 +127,7 @@ def _rule(linked: LinkedDesign, module: str, top_component: Optional[ipxact.Comp
             raise ValueError(f"{where}: cannot tell which of {', '.join(ends)} the address window on {this_end} belongs to")
         decoder, target = endpoint, ends[0]
     elif not others:
-        # Reached from outside this module, through one of its own interfaces.
-        declared = [b.name for b in top_component.bus_interfaces] if top_component is not None else []
-        index = declared.index(hier[0]) if hier and hier[0] in declared else 0
-        return Rule(module, index, connection.name, this_end, base, size, width, from_outside=True)
+        return None  # reached from outside this module: whatever decodes it is in the design that instantiates it
     elif len(others) == 1:
         decoder, target = others[0], this_end
     else:
@@ -153,20 +156,41 @@ def _name_constants(tables: Dict[str, List[Rule]]) -> None:
             claim(rule.name, f"{decoder}.{rule.interface}" if behind[rule.interface] == 1 else f"{decoder}.{rule.interface} to {rule.target}")
 
 
-def build_address_map(
-    linked: LinkedDesign, module: str, top_component: Optional[ipxact.Component] = None, view_of: Callable = lambda name: None
-) -> Optional[AddressMap]:
-    """The design's address map, or None when it records no address window. `view_of` gives an instance's view."""
-    tables: Dict[str, List[Rule]] = {}
+def _declares_a_table(component: ipxact.Component, view: Optional[ipxact.View]) -> bool:
+    """Whether the module of an instance has a parameter for its rule table or its count (D7)."""
+    instantiations = component.model.component_instantiations if component.model is not None else []
+    if view is not None and view.component_instantiation_ref:
+        instantiations = [i for i in instantiations if i.name == view.component_instantiation_ref]
+    return any(p.name in ("ADDR_RULES", "NUM_RULES") for i in instantiations for p in i.module_parameters)
+
+
+def build_address_map(linked: LinkedDesign, module: str, view_of: Callable = lambda name: None) -> Optional[AddressMap]:
+    """The design's address map, or None when no instance of it is a decoder (D51). `view_of` gives an
+    instance's view. Every window the design records is read, so one that is badly written is refused
+    wherever it is, and then only the windows behind a decoder are kept."""
+    windows: Dict[str, List[Rule]] = {}
     for connection in linked.interconnections:
         for endpoint in connection.endpoints:
             if address_window(endpoint.source) is None:
                 continue
-            rule = _rule(linked, module, top_component, view_of, connection, endpoint)
-            table = tables.setdefault(rule.decoder, [])
-            if table and table[0].from_outside != rule.from_outside:
-                raise ValueError(f"instance {module!r} has the name of its module, and the address map cannot tell their windows apart")
-            table.append(rule)
+            rule = _rule(linked, module, view_of, connection, endpoint)
+            if rule is not None:
+                windows.setdefault(rule.decoder, []).append(rule)
+    # How many of each instance's interfaces that take addresses in are connected.
+    hosts = Counter(
+        instance
+        for instance, _ in {
+            (endpoint.instance.instance_name, endpoint.bus_interface.name)
+            for connection in linked.interconnections
+            for endpoint in connection.endpoints
+            if endpoint.bus_interface.mode in _INBOUND
+        }
+    )
+    tables = {
+        name: rules
+        for name, rules in windows.items()
+        if hosts[name] or _declares_a_table(linked.instances[name].component, view_of(name))
+    }
     if not tables:
         return None
 
@@ -193,17 +217,7 @@ def build_address_map(
                     f"{lower.base:#x}-{lower.end:#x} and {upper.base:#x}-{upper.end:#x}, both decoded by {decoder}"
                 )
     _name_constants(tables)
-    hosts = {decoder: 0 for decoder in tables}
-    taken = {
-        (endpoint.instance.instance_name, endpoint.bus_interface.name)
-        for connection in linked.interconnections
-        for endpoint in connection.endpoints
-        if endpoint.bus_interface.mode in _INBOUND
-    }
-    for instance, _ in taken:
-        if instance in hosts:
-            hosts[instance] += 1
-    return AddressMap(module, f"{module}_addr_map_pkg", width, tables, hosts)
+    return AddressMap(module, f"{module}_addr_map_pkg", width, tables, {decoder: hosts[decoder] for decoder in tables})
 
 
 def render_address_map(address_map: AddressMap, header: str) -> str:
@@ -229,10 +243,7 @@ def render_address_map(address_map: AddressMap, header: str) -> str:
         "",
     ]
     for decoder, rules in address_map.tables.items():
-        if decoder == address_map.module:
-            lines.append(f"    // Reached from outside {decoder}, through its own interfaces")
-        else:
-            lines.append(f"    // Decoded by {decoder}")
+        lines.append(f"    // Decoded by {decoder}")
         for rule in rules:
             name = rule.name
             lines.append(f"    // {decoder}.{rule.interface} reaches {rule.target}")
@@ -323,8 +334,6 @@ def render_socgen_package(address_maps: Sequence[AddressMap], package: str, name
         if address_map.width > SOCGEN_WIDTH:
             raise ValueError(f"module {address_map.module}: its address map is {address_map.width} bits wide, and the socgen package's addresses are {SOCGEN_WIDTH}")
         for decoder, rules in address_map.tables.items():
-            if rules[0].from_outside:
-                raise ValueError(f"module {address_map.module}: windows reached from outside it, through its own interfaces, have no place in the socgen package")
             known.add(decoder)
             where = f"{decoder} in {address_map.module}"
             intc = _constant_name(names.get(decoder, decoder).replace("interconnect", "intc"))
@@ -366,7 +375,7 @@ def render_socgen_package(address_maps: Sequence[AddressMap], package: str, name
                 "",
             ]
     if not declarations:
-        raise ValueError(f"the socgen_package option asks for {package}, and no module generated here has an address window")
+        raise ValueError(f"the socgen_package option asks for {package}, and no module generated here has a decoder with an address window")
     unknown = sorted(set(names) - known)
     if unknown:
         raise ValueError(f"socgen_names names {', '.join(unknown)}, which no address window here is decoded by or reaches")
