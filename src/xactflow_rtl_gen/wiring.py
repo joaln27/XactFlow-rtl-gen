@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 import ipxact
 from xactflow import ExpressionError
 
-from .address_map import AddressMap, address_window, build_address_map, for_view
+from .address_map import AddressMap, address_window, build_address_map, for_view, settle_address_map
 from .elaboration import ElaboratedDesign, ElaboratedInstance, HeldDesign, refuse_override_on, resolver_for
 from .expressions import (
     DIMENSION,
@@ -650,7 +650,7 @@ def _port_groups(instance: _Instance) -> List[Tuple[Optional[str], List[_Port]]]
 
 class ModuleBuilder:
     """Wires one elaborated design. build() gives the netlist of its module. After it, `address_map` is the
-    design's address map, if it records one, `instances` holds its instances as they were wired, and `children`
+    design's address map, if one of its instances is a decoder, `instances` holds its instances as they were wired, and `children`
     the hierarchical ones, each of which needs a module of its own."""
 
     def __init__(
@@ -680,6 +680,7 @@ class ModuleBuilder:
         self.undriven: List[str] = []  # the module's outputs that nothing drives, where that is allowed (D38)
         self.net_owners: Dict[str, List[_Port]] = {}  # who holds each net's name, in case it has to change
         self.instances: Dict[str, _Instance] = {}
+        self.given_values: List[str] = []  # what the design gives its instances' parameters, as text
         self.children: List[_Child] = []
         self.blocks: List[_Block] = []
         self.abstraction_defaults: List[Tuple[_Block, _Assign]] = []  # what a tiedValue "default" may replace
@@ -698,6 +699,15 @@ class ModuleBuilder:
         )
         for instance in self.linked.instances.values():
             self._add_instance(instance)
+        # Which instances are decoders is settled by the values the module is written with (D52).
+        self.address_map = settle_address_map(
+            self.address_map,
+            [
+                *(parameter.value for parameter in self.declared),
+                *(value for instance in self.instances.values() for _, value in instance.parameters),
+                *self.given_values,
+            ],
+        )
         for interconnection in self.linked.interconnections:
             self._wire_interconnection(interconnection)
         for connection in self.linked.design.ad_hoc_connections:
@@ -791,6 +801,7 @@ class ModuleBuilder:
         given, counts = self._address_rules_for(name, instantiation, elaborated.overrides)
         elaborated = elaborated.with_values(counts)
         parameters, overrides, resolve = elaborated.parameters, elaborated.overrides, elaborated.resolve
+        self.given_values.extend(overrides.values())
 
         held = self.elaborated.held_by(elaborated)
         if held is not None:

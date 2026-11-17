@@ -976,7 +976,7 @@ rounds are an adversarial AI agent attacking it.
   GitHub turns a scheduled workflow off after 60 days with no activity in the repository.
 
 ## D51. The address map is for the instances that decode, and a design with none has no package
-*2026-11-17 · active · the author's choice, among three · narrows D7, and changes D43's refusal*
+*2026-11-17 · active · the author's choice, among three · narrows D7, and changes D43's refusal · D52 changes what is checked, and adds a way to be a decoder*
 
 - **Decision:** a rule table is written for a decoder only, and a decoder is an instance that addresses pass
   through: it has windows behind the interfaces that send addresses out (`initiator`, `mirroredTarget`), and
@@ -1013,3 +1013,41 @@ rounds are an adversarial AI agent attacking it.
   rather than by `ADDR_RULES`: its package would be missing, and the rule would need a way to name it. Or
   standard address spaces and memory maps replace the `addressMapping` extension (D43), which say by
   themselves what decodes.
+
+## D52. Every window is checked, and an instance whose table the module names is a decoder
+*2026-11-17 · active · the author's choice, after D51's weak points were named · completes D51*
+
+- **Decision:** two things D51 left weak are closed.
+  - Every address window is checked as before D51, whether or not it ends up in a table: that it ends within
+    its bus's address space, and that two behind one instance, or two reached through the module's own
+    interfaces, do not overlap.
+  - An instance is also a decoder when a parameter value the module is written with names a constant of its
+    table in the module's package, such as `soc_addr_map_pkg::DEC_ADDR_PAIRS`.
+- **Why:** D51 checked only the windows of a decoder. A design that 0.3.0 refused for a window past its bus,
+  or for two that overlap, generated in 0.4.0 when they were on a plain master: a mistake in the design went
+  unsaid because of where it was. And D51's own "Revisit if" was a hole, not a remote case: D7 points a
+  decoder with no `ADDR_RULES` at its table by an override, and when nothing was connected to that decoder
+  its package was not written, so the module that named it did not compile.
+- **Where the values are read:** from what the wiring has worked out, not from the documents: the values the
+  module gives each instance's parameters, those the design gives its instances, and those the module
+  declares for itself. A value that names a table is then found whichever way it came: written on the
+  instance, held by a parameter of the design or of the component that holds it, given by a design
+  configuration, the default of the instance's component, or passed into a module generated for a
+  hierarchical instance. Reading the documents was tried first and missed a parameter of the design.
+- **What a value has to name:** `<module>_addr_map_pkg::` followed by a name the table defines: its count,
+  its table and that one's type, its pairs, or the base, end or size of one of its windows. A value that
+  names another package, or a name no table of the design has, changes nothing.
+- **What is as in D51:** which windows are in a table otherwise, and no package without a decoder. An
+  instance with the name of its module is not refused. Names of constants are compared among the tables
+  that are written.
+- **How it is known to hold:** the rule is said once more in the tests, apart from the code, and compared
+  with what is generated for 40 random designs whose instances each have one of seven roles. Each condition
+  of the rule was then broken in turn, ten ways, and each one fails at least one test. The 758 calls of
+  `generate_files()` recorded with D51 are the same, and so are the files of the three real SoCs.
+- **Considered:** refusing a value that names this module's package when no table has that name, which would
+  refuse a design whose package of that name is written by hand; checking the names of constants among the
+  windows that are in no table too, which refuses names nothing writes.
+- **Version:** 0.4.1 with this. Against 0.4.0, a design with a window past its bus or two overlapping ones is
+  refused again where 0.3.0 refused it, and a decoder the design points at its table has its package.
+- **Revisit if:** a table is named from somewhere that is not a parameter value, such as a port's tied value,
+  which the exporter refuses today.

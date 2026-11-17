@@ -256,14 +256,18 @@ ports those are.
 ## Address map
 
 `archidesc`'s `connect_bus(..., base_addr=, size=)` records a window on the connection. The package holds
-the windows as constants, and one rule table for each decoder, an instance that addresses pass through (D51):
-it has windows behind its `initiator` or `mirroredTarget` interfaces, and something is connected to one of
-its `target` or `mirroredInitiator` interfaces, or its module declares `ADDR_RULES` or `NUM_RULES`.
+the windows as constants, and one rule table for each decoder, an instance that addresses pass through (D51).
+It has windows behind its `initiator` or `mirroredTarget` interfaces, and one of these holds:
+
+- something is connected to one of its `target` or `mirroredInitiator` interfaces;
+- its module declares `ADDR_RULES` or `NUM_RULES`;
+- a parameter value the module is written with names its table, such as `soc_addr_map_pkg::DEC_ADDR_PAIRS`,
+  whichever way the value got there (D52).
 
 A window on anything else is in no table: on a master wired straight to a peripheral, and on a connection to
 one of the module's own interfaces, which is decoded in the design that instantiates the module. A design
-with no decoder, such as a subsystem around a few IPs or a single IP, gets no package. Each window is still
-said in the module, in the comment of its connection.
+with no decoder, such as a subsystem around a few IPs or a single IP, gets no package. Such a window is still
+read and checked like any other, and said in the module, in the comment of its connection.
 
 ```systemverilog
     localparam int unsigned DEC_NUM_RULES = 2;
@@ -284,7 +288,7 @@ said in the module, in the comment of its connection.
   common_cells' `cc_addr_decode`, can take the table as it is.
 - A decoder that declares module parameters called `ADDR_RULES` and `NUM_RULES` is given its table. Any
   other decoder has to be pointed at the package by a parameter override, such as
-  `RULES="soc_addr_map_pkg::DEC_ADDR_RULES"`.
+  `RULES="soc_addr_map_pkg::DEC_ADDR_RULES"`, which also makes it a decoder if nothing else does.
 - `DEC_ADDR_PAIRS` holds the same windows as a flat vector of start and end pairs, rule 0 first, for a decoder
   that takes them that way.
 - The address width comes from the logical port the abstraction marks with `isAddress`, and may use the
@@ -349,8 +353,9 @@ It raises `ValueError` rather than writing wrong RTL:
 - `tiedValue="open"` on a part of a port, as only a whole port can be left open;
 - a name in a parameter's value that no parameter in scope explains, and a typedef whose name has no package,
   which a generated module could not see;
-- address windows that overlap on one decoder or pass the end of their bus's address space, a window with no
-  way to tell its decoder, and constants in the package whose names would come out the same;
+- address windows that overlap behind one instance, or among those reached through the module's own
+  interfaces, or pass the end of their bus's address space, whether they end up in a table or not; a window
+  with no way to tell its decoder; and constants in the package whose names would come out the same;
 - a parameter override that reaches no module parameter;
 - a parameter or tied value that cannot be evaluated, or is outside its parameter's `minimum` or `maximum`;
 - a design that contains itself, two different modules with the same name, and a generated module named like

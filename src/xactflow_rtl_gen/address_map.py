@@ -4,9 +4,10 @@ The rule shape, an index with a start address and an exclusive end address, is t
 crossbars and common_cells' addr_decode take, so a table can be handed to them directly.
 
 A decoder is an instance that addresses pass through (D51): it has windows behind its interfaces that send
-addresses out, and something connects to one that takes them in, or it declares ADDR_RULES or NUM_RULES. A
-window on anything else, an initiator wired straight to a target or the module's own interface, is in no
-table, and a design with no decoder has no package.
+addresses out, and something connects to one that takes them in, or it declares ADDR_RULES or NUM_RULES, or
+a parameter value of the module names its table (D52). A window on anything else, an initiator wired straight to a
+target or the module's own interface, is in no table, and a design with no decoder has no package. Every
+window is read and checked all the same, whether it ends up in a table or not (D52).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Union
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Union
 
 import ipxact
 from xactflow import ExpressionError, LinkedDesign, evaluate, parameter_resolver
@@ -45,7 +46,7 @@ def address_window(interface: object) -> Optional[Dict[str, str]]:
 
 @dataclass
 class Rule:
-    decoder: str  # the instance that decodes the address
+    decoder: str  # the instance on the side that sends the address, or the module for a window from outside
     index: int  # which of its initiator interfaces the window is reached through
     interface: str  # that interface's name
     target: str  # "<instance>.<bus interface>" of the target
@@ -53,6 +54,7 @@ class Rule:
     size: int
     width: Optional[int] = None  # of this window's own bus, when its abstraction says
     name: str = ""  # what its constants are called
+    from_outside: bool = False  # reached through one of the module's own interfaces: checked, and in no table
 
     @property
     def end(self) -> int:
@@ -66,6 +68,10 @@ class AddressMap:
     width: int
     tables: Dict[str, List[Rule]]
     hosts: Dict[str, int] = field(default_factory=dict)  # how many of each decoder's interfaces that take addresses in are connected
+    # The windows of each instance that is a decoder only if a value of the module names its table (D52),
+    # until settle_address_map() has seen the values.
+    candidates: Dict[str, List[Rule]] = field(default_factory=dict)
+    order: List[str] = field(default_factory=list)  # the instances with windows, in the design's order
 
     def constant(self, decoder: str, what: str) -> str:
         return f"{_constant_name(decoder)}_{what}"
@@ -99,9 +105,9 @@ def _index_of(interface: ipxact.BusInterface, component: ipxact.Component) -> in
     return [b.name for b in component.bus_interfaces if b.mode in modes].index(interface.name)
 
 
-def _rule(linked: LinkedDesign, module: str, view_of: Callable, connection, endpoint) -> Optional[Rule]:
-    """The window recorded on one end of a connection, under the instance on the side that sends the address.
-    None for a window reached through one of the module's own interfaces: nothing in the module decodes it."""
+def _rule(linked: LinkedDesign, module: str, view_of: Callable, connection, endpoint) -> Rule:
+    """The window recorded on one end of a connection, under the instance on the side that sends the address,
+    or under the module when it is reached through one of the module's own interfaces."""
     where = f"interconnection {connection.name!r}"
     this_end = f"{endpoint.instance.instance_name}.{endpoint.bus_interface.name}"
     window = address_window(endpoint.source)
@@ -127,7 +133,8 @@ def _rule(linked: LinkedDesign, module: str, view_of: Callable, connection, endp
             raise ValueError(f"{where}: cannot tell which of {', '.join(ends)} the address window on {this_end} belongs to")
         decoder, target = endpoint, ends[0]
     elif not others:
-        return None  # reached from outside this module: whatever decodes it is in the design that instantiates it
+        # Reached from outside this module: what decodes it is in the design that instantiates the module.
+        return Rule(module, 0, connection.name, this_end, base, size, width, from_outside=True)
     elif len(others) == 1:
         decoder, target = others[0], this_end
     else:
@@ -137,9 +144,26 @@ def _rule(linked: LinkedDesign, module: str, view_of: Callable, connection, endp
     return Rule(decoder.instance.instance_name, index, decoder.bus_interface.name, target, base, size, width)
 
 
-def _name_constants(tables: Dict[str, List[Rule]]) -> None:
-    """Name each window's constants, refusing names that come out the same: they are upper case, and
-    SystemVerilog names may differ only in case."""
+def _name_windows(decoder: str, rules: List[Rule]) -> None:
+    """Say what each window's constants are called: after the decoder and its interface, and after the target
+    too when one interface reaches several."""
+    behind = Counter(rule.interface for rule in rules)
+    for rule in rules:
+        parts = (decoder, rule.interface) if behind[rule.interface] == 1 else (decoder, rule.interface, rule.target)
+        rule.name = _constant_name(*parts)
+
+
+_OF_A_TABLE = ("NUM_RULES", "ADDR_RULES", "ADDR_RULES_t", "ADDR_PAIRS")
+_OF_A_WINDOW = ("BASE", "END", "SIZE")
+
+
+def _constants_of(decoder: str, rules: List[Rule]) -> Set[str]:
+    """Every name the package defines for one decoder's table, once its windows are named."""
+    return {f"{_constant_name(decoder)}_{what}" for what in _OF_A_TABLE} | {f"{rule.name}_{what}" for rule in rules for what in _OF_A_WINDOW}
+
+
+def _claim_constants(tables: Dict[str, List[Rule]]) -> None:
+    """Refuse names that come out the same: they are upper case, and SystemVerilog names may differ only in case."""
     owners: Dict[str, str] = {}
 
     def claim(name: str, owner: str) -> None:
@@ -151,9 +175,32 @@ def _name_constants(tables: Dict[str, List[Rule]]) -> None:
             claim(f"{_constant_name(decoder)}_{what}", decoder)
         behind = Counter(rule.interface for rule in rules)
         for rule in rules:
-            parts = (decoder, rule.interface) if behind[rule.interface] == 1 else (decoder, rule.interface, rule.target)
-            rule.name = _constant_name(*parts)
             claim(rule.name, f"{decoder}.{rule.interface}" if behind[rule.interface] == 1 else f"{decoder}.{rule.interface} to {rule.target}")
+
+
+def _width_of(rules: List[Rule]) -> int:
+    """The address width a set of windows needs: the widest their buses say, and 32 bits for a bus that says
+    none, or 64 when one of its windows needs it."""
+    widths = {rule.width for rule in rules if rule.width is not None}
+    unsaid = [rule for rule in rules if rule.width is None]
+    if unsaid:
+        widths.add(64 if max(rule.end for rule in unsaid) > 1 << _DEFAULT_WIDTH else _DEFAULT_WIDTH)
+    return max(widths)
+
+
+def _check_windows(rules: List[Rule], width: int, together: str) -> None:
+    """Refuse a window that passes the end of its bus's address space, and two that overlap."""
+    by_address = sorted(rules, key=lambda rule: rule.base)
+    for rule in by_address:
+        limit = rule.width if rule.width is not None else width
+        if rule.end > 1 << limit:
+            raise ValueError(f"the address window of {rule.target} ends at {rule.end:#x}, past the {limit}-bit address space")
+    for lower, upper in zip(by_address, by_address[1:]):
+        if lower.end > upper.base:
+            raise ValueError(
+                f"the address windows of {lower.target} and {upper.target} overlap: "
+                f"{lower.base:#x}-{lower.end:#x} and {upper.base:#x}-{upper.end:#x}, {together}"
+            )
 
 
 def _declares_a_table(component: ipxact.Component, view: Optional[ipxact.View]) -> bool:
@@ -165,17 +212,30 @@ def _declares_a_table(component: ipxact.Component, view: Optional[ipxact.View]) 
 
 
 def build_address_map(linked: LinkedDesign, module: str, view_of: Callable = lambda name: None) -> Optional[AddressMap]:
-    """The design's address map, or None when no instance of it is a decoder (D51). `view_of` gives an
-    instance's view. Every window the design records is read, so one that is badly written is refused
-    wherever it is, and then only the windows behind a decoder are kept."""
-    windows: Dict[str, List[Rule]] = {}
+    """The design's address map as far as the design alone says, or None when it has no window behind an
+    instance. `view_of` gives an instance's view. Every window the design records is read and checked, one in
+    no table like any other (D52). The tables are those of the instances that are decoders by what is
+    connected to them or by what their module declares (D51); the windows of the others wait in
+    `candidates` for settle_address_map(), which is what says whether there is a package."""
+    windows: Dict[str, List[Rule]] = {}  # by the instance on the side that sends the address
+    outside: List[Rule] = []  # reached through the module's own interfaces
     for connection in linked.interconnections:
         for endpoint in connection.endpoints:
             if address_window(endpoint.source) is None:
                 continue
             rule = _rule(linked, module, view_of, connection, endpoint)
-            if rule is not None:
-                windows.setdefault(rule.decoder, []).append(rule)
+            (outside if rule.from_outside else windows.setdefault(rule.decoder, [])).append(rule)
+    if not windows and not outside:
+        return None
+
+    width_of_all = _width_of([*outside, *(rule for rules in windows.values() for rule in rules)])
+    for name, rules in windows.items():
+        _check_windows(rules, width_of_all, f"both decoded by {name}")
+        _name_windows(name, rules)
+    _check_windows(outside, width_of_all, f"both reached through the interfaces of {module}")
+    if not windows:
+        return None
+
     # How many of each instance's interfaces that take addresses in are connected.
     hosts = Counter(
         instance
@@ -191,33 +251,33 @@ def build_address_map(linked: LinkedDesign, module: str, view_of: Callable = lam
         for name, rules in windows.items()
         if hosts[name] or _declares_a_table(linked.instances[name].component, view_of(name))
     }
-    if not tables:
+    _claim_constants(tables)
+    candidates = {name: rules for name, rules in windows.items() if name not in tables}
+    return AddressMap(module, f"{module}_addr_map_pkg", 0, tables, {name: hosts[name] for name in tables}, candidates, list(windows))
+
+
+def settle_address_map(address_map: Optional[AddressMap], values: Iterable[str]) -> Optional[AddressMap]:
+    """The address map once the module's parameter values are known, or None when the design has no decoder
+    (D51). `values` are those the module gives its instances and declares for itself. An instance that is a
+    decoder for no other reason is one if a value names a constant of its table, such as
+    `soc_addr_map_pkg::DEC_ADDR_PAIRS`: that is how a decoder with no ADDR_RULES is pointed at its table
+    (D7), and the module would not compile without the package (D52)."""
+    if address_map is None:
         return None
-
-    rules_of_all = [rule for rules in tables.values() for rule in rules]
-    widths = {rule.width for rule in rules_of_all if rule.width is not None}
-    unsaid = [rule for rule in rules_of_all if rule.width is None]  # a window whose bus doesn't say how wide it is
-    if unsaid:
-        widths.add(64 if max(rule.end for rule in unsaid) > 1 << _DEFAULT_WIDTH else _DEFAULT_WIDTH)
-    width = max(widths)
-
-    for decoder, rules in tables.items():
+    if address_map.candidates:
+        names = re.compile(rf"(?<![\w$]){re.escape(address_map.package)}::(\w+)")
+        named = {name for value in values for name in names.findall(value)}
+        for decoder in [name for name, rules in address_map.candidates.items() if named & _constants_of(name, rules)]:
+            address_map.tables[decoder] = address_map.candidates.pop(decoder)
+            address_map.hosts[decoder] = 0
+    if not address_map.tables:
+        return None
+    address_map.tables = {name: address_map.tables[name] for name in address_map.order if name in address_map.tables}
+    for rules in address_map.tables.values():
         rules.sort(key=lambda rule: (rule.index, rule.base))
-        by_address = sorted(rules, key=lambda rule: rule.base)
-        for rule in by_address:
-            limit = rule.width if rule.width is not None else width
-            if rule.end > 1 << limit:
-                raise ValueError(
-                    f"the address window of {rule.target} ends at {rule.end:#x}, past the {limit}-bit address space"
-                )
-        for lower, upper in zip(by_address, by_address[1:]):
-            if lower.end > upper.base:
-                raise ValueError(
-                    f"the address windows of {lower.target} and {upper.target} overlap: "
-                    f"{lower.base:#x}-{lower.end:#x} and {upper.base:#x}-{upper.end:#x}, both decoded by {decoder}"
-                )
-    _name_constants(tables)
-    return AddressMap(module, f"{module}_addr_map_pkg", width, tables, {decoder: hosts[decoder] for decoder in tables})
+    _claim_constants(address_map.tables)
+    address_map.width = _width_of([rule for rules in address_map.tables.values() for rule in rules])
+    return address_map
 
 
 def render_address_map(address_map: AddressMap, header: str) -> str:

@@ -1,5 +1,8 @@
 """The address map package, and an address actually decoded through a generated module."""
 
+import random
+import re
+
 import ipxact
 import pytest
 from xactflow import link
@@ -157,20 +160,47 @@ def host():
     return component("host", [wire("req_o", "out")], [bus("h", "initiator", port_map("FLAG", "req_o"))])
 
 
-def soc_with(decoders=None, hosted=(), straight=(), size=0x1000):
-    """`decoders` maps an instance to its component's name, each with one window at 0x4000_0000 behind its m0.
-    Those in `hosted` have a host connected to their interface s. Each name in `straight` is a host wired to
-    a target of its own, with a window on that connection."""
-    library = library_of([*bus_documents(), decoder(), plain_decoder(), chosen(), host()])
+def pointed_decoder(name="pointed_decoder", default="0"):
+    """A decoder that takes its windows through a parameter of its own, RULES, and declares no ADDR_RULES: the
+    design has to point it at its table (D7). `default` is what the component itself gives RULES."""
+    return component(
+        name,
+        [wire("addr_i", "in", 32), wire("sel_o", "out", 2)],
+        [
+            bus("m0", "initiator", port_map("FLAG", "sel_o", select=(0, 0))),
+            bus("m1", "initiator", port_map("FLAG", "sel_o", select=(1, 1))),
+        ],
+        parameters={"RULES": default},
+    )
+
+
+def pairs_of(name):
+    return f"soc_addr_map_pkg::{name.upper()}_ADDR_PAIRS"
+
+
+def soc_with(decoders=None, hosted=(), straight=(), size=0x1000, pointed=(), through=(), more=(), windows=((0x4000_0000, "m0"),)):
+    """`decoders` maps an instance to its component's name, each with one window at 0x4000_0000 behind its m0,
+    or those of `windows`. Those in `hosted` have a host connected to their interface s. Those in `pointed`
+    are given their table by the design, in their parameter RULES, and those in `through` are given a
+    parameter of the design that holds the table's name. Each name in `straight` is a host wired to a target
+    of its own, with a window on that connection. `more` are components to add to the library."""
+    library = library_of([*bus_documents(), decoder(), plain_decoder(), pointed_decoder(), chosen(), host(), *more])
     design = Design("test.org:design:soc:1.0", library)
     for name, kind in (decoders or {}).items():
-        instance = design.add_ip(name, f"test.org:ip:{kind}:1.0")
+        value = pairs_of(name) if name in pointed else f"{name}_table" if name in through else None
+        instance = design.add_ip(name, f"test.org:ip:{kind}:1.0", parameters={"RULES": value} if value else None)
         if name in hosted:
             design.connect_bus(design.add_ip(f"{name}_host", "test.org:ip:host:1.0"), instance.bus("s"))
-        design.connect_bus(instance.bus("m0"), design.add_ip(f"{name}_target", "test.org:ip:chosen:1.0"), base_addr=0x4000_0000, size=size)
+        for index, (base, interface) in enumerate(windows):
+            target = design.add_ip(f"{name}_target{index or ''}", "test.org:ip:chosen:1.0")
+            design.connect_bus(instance.bus(interface), target, base_addr=base, size=size)
     for name in straight:
         design.connect_bus(design.add_ip(name, "test.org:ip:host:1.0"), design.add_ip(f"{name}_target", "test.org:ip:chosen:1.0"), base_addr=0x8000, size=size)
-    return link(design_alone(design), library)
+    built = design_alone(design)
+    built.parameters = [
+        ipxact.Parameter(name=f"{name}_table", value=ipxact.Expression(pairs_of(name)), parameter_id=f"{name}_table") for name in through
+    ]
+    return link(built, library)
 
 
 def test_a_decoder_is_an_instance_that_addresses_pass_through():
@@ -281,3 +311,132 @@ def test_address_width_defaults_to_32_bits_and_grows_when_it_has_to():
 
     assert "logic [31:0] start_addr" in package_for(0x1000, 0x1000)
     assert "logic [63:0] start_addr" in package_for(0x1_0000_0000, 0x1000)
+
+
+
+# --- a decoder the design points at its table (D52)
+
+POINTED = """
+module pointed_decoder #(parameter logic [63:0] RULES = '0) (input logic [31:0] addr_i, output logic [1:0] sel_o);
+    assign sel_o = {1'b0, addr_i >= RULES[63:32] && addr_i < RULES[31:0]};
+endmodule
+module chosen (input logic sel_i, output logic seen_o);
+    assign seen_o = sel_i;
+endmodule
+"""
+
+POINTED_TESTBENCH = """
+module tb;
+    logic [31:0] addr;
+    wire seen;
+    soc dut (.dec_addr_i(addr), .dec_target_seen_o(seen));
+    initial begin
+        addr = 32'h4000_0000; #1; if (seen !== 1'b1) $display("FAIL at the start of the window");
+        addr = 32'h4000_0fff; #1; if (seen !== 1'b1) $display("FAIL at the end of the window");
+        addr = 32'h4000_1000; #1; if (seen !== 1'b0) $display("FAIL past the window");
+        addr = 32'h3fff_ffff; #1; if (seen !== 1'b0) $display("FAIL before the window");
+        $display("PASS");
+        $finish;
+    end
+endmodule
+"""
+
+
+def test_a_decoder_the_design_points_at_its_table_keeps_it():
+    """Nothing is connected to it and it declares no ADDR_RULES: the value that names its table makes it one."""
+    files = generate_files(soc_with({"dec": "pointed_decoder"}, pointed=["dec"]))
+    assert ".RULES(soc_addr_map_pkg::DEC_ADDR_PAIRS)" in files["soc.sv"]
+    assert "localparam logic [63:0] DEC_ADDR_PAIRS = {32'h40000000, 32'h40001000};" in files["soc_addr_map_pkg.sv"]
+
+
+def test_a_decoder_whose_component_names_its_table_keeps_it():
+    own = pointed_decoder("own_decoder", default=pairs_of("dec"))
+    files = generate_files(soc_with({"dec": "own_decoder"}, more=[own]))
+    assert "// Decoded by dec\n" in files["soc_addr_map_pkg.sv"]
+
+
+def test_a_table_named_through_a_parameter_of_the_design_is_kept():
+    """The value on the instance is the design's parameter, which holds the name: what counts is what the
+    module is written with."""
+    files = generate_files(soc_with({"dec": "pointed_decoder"}, through=["dec"]))
+    assert ".RULES(soc_addr_map_pkg::DEC_ADDR_PAIRS)" in files["soc.sv"]
+    assert "// Decoded by dec\n" in files["soc_addr_map_pkg.sv"]
+
+
+def test_a_value_that_names_another_table_keeps_only_that_one():
+    """dec2 is given dec's table, so dec has one. dec2's own windows are still in none."""
+    library = library_of([*bus_documents(), pointed_decoder(), chosen()])
+    design = Design("test.org:design:soc:1.0", library)
+    for name, value in (("dec", None), ("dec2", pairs_of("dec"))):
+        instance = design.add_ip(name, "test.org:ip:pointed_decoder:1.0", parameters={"RULES": value} if value else None)
+        design.connect_bus(instance.bus("m0"), design.add_ip(f"{name}_target", "test.org:ip:chosen:1.0"), base_addr=0x1000, size=0x1000)
+    package = generate_files(link(design_alone(design), library))["soc_addr_map_pkg.sv"]
+    assert re.findall(r"// Decoded by (\w+)\n", package) == ["dec"]
+
+
+def test_a_value_that_names_no_table_of_the_design_keeps_none():
+    library = library_of([*bus_documents(), pointed_decoder(), chosen()])
+    design = Design("test.org:design:soc:1.0", library)
+    dec = design.add_ip("dec", "test.org:ip:pointed_decoder:1.0", parameters={"RULES": "other_addr_map_pkg::DEC_ADDR_PAIRS"})
+    design.connect_bus(dec.bus("m0"), design.add_ip("dec_target", "test.org:ip:chosen:1.0"), base_addr=0x1000, size=0x1000)
+    assert list(generate_files(link(design_alone(design), library))) == ["soc.sv"]
+
+
+def test_a_pointed_decoder_compiles_with_slang():
+    files = generate_files(soc_with({"dec": "pointed_decoder"}, pointed=["dec"]))
+    assert slang_errors(files["soc_addr_map_pkg.sv"], files["soc.sv"], POINTED) == []
+
+
+@pytest.mark.skipif(not has_verilator, reason="verilator not installed")
+def test_verilator_finds_no_errors_in_a_pointed_decoder(tmp_path):
+    result = verilator_lint(tmp_path, generate_files(soc_with({"dec": "pointed_decoder"}, pointed=["dec"])), [POINTED], "soc")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not has_icarus, reason="iverilog not installed")
+def test_addresses_decode_through_a_pointed_decoder(tmp_path):
+    output = simulate(tmp_path, generate_files(soc_with({"dec": "pointed_decoder"}, pointed=["dec"])), [POINTED], POINTED_TESTBENCH)
+    assert "PASS" in output and "FAIL" not in output, output
+
+
+# --- a window in no table is checked like any other (D52)
+
+
+def test_a_window_past_its_address_space_is_refused_where_nothing_decodes_it():
+    with pytest.raises(ValueError, match="the address window of cpu_target.b ends at 0x100008000, past the 32-bit address space"):
+        generate_files(soc_with(straight=["cpu"], size=1 << 32))
+
+
+def test_overlapping_windows_are_refused_behind_an_instance_that_is_no_decoder():
+    with pytest.raises(ValueError, match="dec_target.b and dec_target1.b overlap: 0x1000-0x2000 and 0x1800-0x2800, both decoded by dec"):
+        generate_files(soc_with({"dec": "plain_decoder"}, windows=((0x1000, "m0"), (0x1800, "m1"))))
+
+
+# --- the rule once more, apart from the code (D51, D52)
+
+ROLES = ("hosted", "declares", "pointed", "pointed through the design", "points by default", "bare", "bare with a parameter")
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_tables_of_a_random_design_are_those_of_its_decoders(seed):
+    """An instance that sends addresses to windows has a table if a host is connected to it, or its module
+    declares the table, or a value the module is written with names its table. Nothing else has one, and with
+    no table there is no package. Each instance here is given one of those roles at random, next to masters
+    wired straight to a target."""
+    chance = random.Random(seed)
+    roles = {f"d{index}": chance.choice(ROLES) for index in range(chance.randint(1, 4))}
+    kinds = {"hosted": "plain_decoder", "declares": "decoder", "bare": "plain_decoder"}  # the others have the parameter RULES
+    own = [pointed_decoder(f"{name}_ip", default=pairs_of(name)) for name, role in roles.items() if role == "points by default"]
+    linked = soc_with(
+        {name: f"{name}_ip" if role == "points by default" else kinds.get(role, "pointed_decoder") for name, role in roles.items()},
+        hosted=[name for name, role in roles.items() if role == "hosted"],
+        pointed=[name for name, role in roles.items() if role == "pointed"],
+        through=[name for name, role in roles.items() if role == "pointed through the design"],
+        straight=[f"cpu{index}" for index in range(chance.randint(0, 2))],
+        more=own,
+    )
+    files = generate_files(linked)
+    decoders = {name for name, role in roles.items() if not role.startswith("bare")}
+    assert set(re.findall(r"// Decoded by (\w+)\n", files.get("soc_addr_map_pkg.sv", ""))) == decoders, roles
+    assert ("soc_addr_map_pkg.sv" in files) == bool(decoders), roles
+

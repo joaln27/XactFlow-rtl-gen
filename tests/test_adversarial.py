@@ -1846,6 +1846,42 @@ def test_windows_reached_from_outside_the_module_are_in_no_table():
     assert "a.b address window: baseAddr 0x1000, size 0x1000" in files["chip.sv"]  # still said where it is connected
 
 
+def test_a_table_named_inside_a_module_generated_below_is_kept():
+    """`w` is generated here for a value that names dec's table, so its module names this module's package,
+    which has to be there for it (D52)."""
+    pointed = component(
+        "pointed", [wire("x_o", "out")], [bus("m0", "initiator", port_map("FLAG", "x_o"))], parameters={"RULES": 0}
+    )
+    wrap = hierarchical("wrap", "wrap_d", [])
+    wrap.parameters = [ipxact.Parameter(name="P", value=_E("0"), parameter_id="P", resolve="user")]
+    inside = design("wrap_d", [instance("u", "pointed", RULES="P")])
+    soc = design(
+        "soc",
+        [instance("dec", "pointed"), instance("a", "chosen"), instance("w", "wrap", P="soc_addr_map_pkg::DEC_ADDR_PAIRS")],
+        [link_to("l0", active(("dec", "m0")), window(("a", "b"), 0x1000, 0x1000))],
+    )
+    files = files_of(soc, [pointed, target_ip(), wrap, inside], unconnected="open")
+    assert ".RULES(soc_addr_map_pkg::DEC_ADDR_PAIRS)" in files["wrap_1.sv"]
+    assert "// Decoded by dec\n" in files["soc_addr_map_pkg.sv"]
+
+
+def test_windows_reached_from_outside_the_module_are_checked_like_any_other():
+    """They are in no table, and two that overlap are still refused (D52)."""
+    chip = hierarchical(
+        "chip", "chip_d", [wire("f1", "in"), wire("f2", "in")], [bus("u1", "target", port_map("FLAG", "f1")), bus("u2", "target", port_map("FLAG", "f2"))]
+    )
+    chip_d = design("chip_d", [instance("a", "chosen"), instance("b", "chosen")])
+    chip_d.interconnections = [
+        ipxact.Interconnection(name="l1", active_interface=window(("a", "b"), 0x1000, 0x1000), hier_interfaces=[ipxact.HierInterface(bus_ref="u1")]),
+        ipxact.Interconnection(name="l2", active_interface=window(("b", "b"), 0x1800, 0x1000), hier_interfaces=[ipxact.HierInterface(bus_ref="u2")]),
+    ]
+    refused(
+        "a.b and b.b overlap: 0x1000-0x2000 and 0x1800-0x2800, both reached through the interfaces of chip",
+        chip_d,
+        [chip, component("chosen", [wire("sel_i", "in")], [bus("b", "target", port_map("FLAG", "sel_i"))])],
+    )
+
+
 def test_a_decoder_fed_through_the_modules_own_interface_keeps_its_table():
     """A subsystem with a decoder inside: the addresses come in through the module, and the instance decodes them."""
     router = component(
